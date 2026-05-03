@@ -1,13 +1,20 @@
 
-
+ 
 import asyncio
 import json
 import math
+import os
 import threading
 import time
 
 import websockets
 from pymavlink import mavutil
+
+DRONE_CONNECTION = os.getenv("DRONE_CONNECTION", "COM18")
+DRONE_BAUD = int(os.getenv("DRONE_BAUD", "9600"))
+WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
+WS_PORT = int(os.getenv("WS_PORT", "8765"))
+STREAM_HZ = int(os.getenv("STREAM_HZ", "20"))
 
 
 COPTER_MODES = {
@@ -19,9 +26,9 @@ COPTER_MODES = {
 }
 MODE_NAME_TO_ID = {v: k for k, v in COPTER_MODES.items()}
 
-print("Connecting to COM12 @ 115200 baud ...")
+print(f"Connecting to {DRONE_CONNECTION} @ {DRONE_BAUD} baud ...")
 master = mavutil.mavlink_connection(
-    "COM12", baud=115200,
+    DRONE_CONNECTION, baud=DRONE_BAUD,
     autoreconnect=True,
     source_system=255,    
     source_component=0,
@@ -31,17 +38,17 @@ print(f"Heartbeat received — SysID={master.target_system}  CompID={master.targ
 
 
 def request_streams():
-    """Ask ArduPilot to stream all telemetry at 20 Hz."""
+    """Ask ArduPilot to stream all telemetry at the configured rate."""
     if master.target_system == 0:
         return   # not connected yet
     master.mav.request_data_stream_send(
         master.target_system,
         master.target_component,
         mavutil.mavlink.MAV_DATA_STREAM_ALL,
-        20,   # 20 Hz
+        STREAM_HZ,
         1,    # start
     )
-    print("Data streams requested @ 20 Hz")
+    print(f"Data streams requested @ {STREAM_HZ} Hz")
 
 request_streams()
 
@@ -62,12 +69,30 @@ telem = {
     "heading_deg": 0.0, "vspeed":     0.0,
     # Battery
     "batt_voltage": 0.0, "batt_current": 0.0, "batt_pct": -1,
+    # RC Channels (transmitter inputs) — 1500 = centre
+    "rc1": 0, "rc2": 0, "rc3": 0, "rc4": 0,
+    "rc5": 0, "rc6": 0, "rc7": 0, "rc8": 0,
+    "rc_rssi": 0,
     # Status
     "flight_mode": "UNKNOWN", "armed": False, "ekf_ok": False,
     # Timestamp
     "ts": 0,
+    "connection": DRONE_CONNECTION,
+    "baud": DRONE_BAUD,
+    "stream_hz": STREAM_HZ,
 }
 lock = threading.Lock()
+
+
+def valid_coord(latitude, longitude):
+    """Reject unset or impossible MAVLink coordinates before sending them to the map."""
+    return (
+        latitude is not None
+        and longitude is not None
+        and -90 <= latitude <= 90
+        and -180 <= longitude <= 180
+        and (abs(latitude) > 0.001 or abs(longitude) > 0.001)
+    )
 
 
 
@@ -114,9 +139,10 @@ def reader():
 
           
             elif mtype in ("RAW_IMU", "SCALED_IMU2"):
-                telem["raw_ax"] = round(msg.xacc / 1000.0, 4)
-                telem["raw_ay"] = round(msg.yacc / 1000.0, 4)
-                telem["raw_az"] = round(msg.zacc / 1000.0, 4)
+                # RAW_IMU/SCALED_IMU acceleration is in milli-g; display expects m/s^2.
+                telem["raw_ax"] = round(msg.xacc * 9.80665 / 1000.0, 4)
+                telem["raw_ay"] = round(msg.yacc * 9.80665 / 1000.0, 4)
+                telem["raw_az"] = round(msg.zacc * 9.80665 / 1000.0, 4)
 
             
             elif mtype == "HIGHRES_IMU":
@@ -132,7 +158,7 @@ def reader():
                 la = msg.lat / 1e7
                 lo = msg.lon / 1e7
                
-                if abs(la) > 0.001 or abs(lo) > 0.001:
+                if valid_coord(la, lo):
                     telem["lat"] = round(la, 7)
                     telem["lon"] = round(lo, 7)
                 telem["alt_msl"] = round(msg.alt / 1000.0, 2)
@@ -154,10 +180,10 @@ def reader():
                 
                 telem["hdop"] = round(msg.eph / 100.0, 2) if msg.eph != 65535 else 99.0
                 
-                if telem["lat"] is None and msg.fix_type >= 2:
+                if msg.fix_type >= 2:
                     la = msg.lat / 1e7
                     lo = msg.lon / 1e7
-                    if abs(la) > 0.001 or abs(lo) > 0.001:
+                    if valid_coord(la, lo):
                         telem["lat"] = round(la, 7)
                         telem["lon"] = round(lo, 7)
 
@@ -205,6 +231,43 @@ def reader():
                 VEL_HORIZ_OK = (1 << 1)
                 POS_HORIZ_OK = (1 << 3)
                 telem["ekf_ok"] = bool(f & ATTITUDE_OK and f & VEL_HORIZ_OK and f & POS_HORIZ_OK)
+
+            # ── RC Channels from transmitter ─────────────────────
+            elif mtype == "RC_CHANNELS":
+                telem["rc1"] = msg.chan1_raw
+                telem["rc2"] = msg.chan2_raw
+                telem["rc3"] = msg.chan3_raw
+                telem["rc4"] = msg.chan4_raw
+                telem["rc5"] = msg.chan5_raw
+                telem["rc6"] = msg.chan6_raw
+                telem["rc7"] = msg.chan7_raw
+                telem["rc8"] = msg.chan8_raw
+                telem["rc_rssi"] = msg.rssi
+
+            elif mtype == "RC_CHANNELS_RAW":
+                # Fallback for older firmwares that send RC_CHANNELS_RAW
+                telem["rc1"] = msg.chan1_raw
+                telem["rc2"] = msg.chan2_raw
+                telem["rc3"] = msg.chan3_raw
+                telem["rc4"] = msg.chan4_raw
+                telem["rc5"] = msg.chan5_raw
+                telem["rc6"] = msg.chan6_raw
+                telem["rc7"] = msg.chan7_raw
+                telem["rc8"] = msg.chan8_raw
+                telem["rc_rssi"] = msg.rssi
+
+            elif mtype == "SERVO_OUTPUT_RAW":
+                # Also capture servo outputs as fallback RC display
+                # Only use if no RC_CHANNELS data has arrived yet
+                if telem["rc1"] == 0:
+                    telem["rc1"] = msg.servo1_raw
+                    telem["rc2"] = msg.servo2_raw
+                    telem["rc3"] = msg.servo3_raw
+                    telem["rc4"] = msg.servo4_raw
+                    telem["rc5"] = getattr(msg, 'servo5_raw', 0)
+                    telem["rc6"] = getattr(msg, 'servo6_raw', 0)
+                    telem["rc7"] = getattr(msg, 'servo7_raw', 0)
+                    telem["rc8"] = getattr(msg, 'servo8_raw', 0)
 
 
 threading.Thread(target=reader, daemon=True, name="mav-reader").start()
@@ -293,7 +356,7 @@ def _arm(arm: bool):
 
 
 async def _send_loop(ws):
-    """Push a telemetry snapshot to the browser at ~20 Hz."""
+    """Push telemetry snapshots to the browser at the configured stream rate."""
     while True:
         await asyncio.sleep(0.05)
         with lock:
@@ -344,12 +407,13 @@ async def main():
     asyncio.create_task(_gcs_heartbeat())
 
     print("=" * 50)
-    print("  DroneGuard MAVLink Backend v3")
-    print("  WebSocket: ws://0.0.0.0:8765")
-    print("  Drone:     COM12 @ 115200 baud")
+    print("  DroneGuard MAVLink Backend v4")
+    print(f"  WebSocket: ws://{WS_HOST}:{WS_PORT}")
+    print(f"  Drone:     {DRONE_CONNECTION} @ {DRONE_BAUD} baud")
+    print(f"  Stream:    {STREAM_HZ} Hz")
     print("=" * 50)
 
-    async with websockets.serve(ws_handler, "0.0.0.0", 8765):
+    async with websockets.serve(ws_handler, WS_HOST, WS_PORT):
         await asyncio.Future()   # run forever
 
 

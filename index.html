@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DroneGuard - MAVLink Telemetry Dashboard</title>
+  <meta name="description" content="Real-time MAVLink telemetry dashboard for drone monitoring, attitude, IMU, GPS, and vehicle control.">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;500;600;700;900&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <!-- ═══ AMBIENT PARTICLES (CSS-driven) ═══ -->
+  <div class="ambient-particles" aria-hidden="true">
+    <div class="particle p1"></div>
+    <div class="particle p2"></div>
+    <div class="particle p3"></div>
+    <div class="particle p4"></div>
+    <div class="particle p5"></div>
+    <div class="particle p6"></div>
+  </div>
+
+  <!-- ═══ HEADER ═══ -->
+  <header id="main-header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-icon">◈</span>
+        DRONE<span class="logo-accent">GUARD</span>
+        <sup class="logo-ver">v4</sup>
+      </div>
+    </div>
+
+    <div class="header-center">
+      <div class="status-pills">
+        <div class="pill" id="pill-ws">
+          <span class="pill-dot"></span>
+          <span class="pill-text" id="pill-ws-text">BACKEND OFFLINE</span>
+        </div>
+        <div class="pill" id="pill-drone">
+          <span class="pill-dot"></span>
+          <span class="pill-text" id="pill-drone-text">DRONE DISCONNECTED</span>
+        </div>
+        <div class="pill" id="pill-armed" style="display:none">
+          <span class="pill-dot"></span>
+          <span class="pill-text">ARMED</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="hz-badge" id="hz-badge">-- Hz</div>
+      <div class="clock" id="hdr-clock">00:00:00</div>
+    </div>
+  </header>
+
+  <!-- ═══ MAIN DASHBOARD ═══ -->
+  <main class="dashboard">
+
+    <!-- ── TOP ROW: Quick Stats ── -->
+    <section class="quick-stats" id="quick-stats">
+      <div class="qs-card">
+        <div class="qs-icon">⬡</div>
+        <div class="qs-body">
+          <div class="qs-value" id="qs-mode">STABILIZE</div>
+          <div class="qs-label">FLIGHT MODE</div>
+        </div>
+      </div>
+      <div class="qs-card">
+        <div class="qs-icon">▲</div>
+        <div class="qs-body">
+          <div class="qs-value" id="qs-alt">0.0 m</div>
+          <div class="qs-label">ALTITUDE</div>
+        </div>
+      </div>
+      <div class="qs-card">
+        <div class="qs-icon">⟐</div>
+        <div class="qs-body">
+          <div class="qs-value" id="qs-spd">0.0 m/s</div>
+          <div class="qs-label">GROUND SPEED</div>
+        </div>
+      </div>
+      <div class="qs-card">
+        <div class="qs-icon">⏚</div>
+        <div class="qs-body">
+          <div class="qs-value" id="qs-batt">-- V</div>
+          <div class="qs-label">BATTERY</div>
+        </div>
+      </div>
+      <div class="qs-card">
+        <div class="qs-icon">◉</div>
+        <div class="qs-body">
+          <div class="qs-value" id="qs-sats">--</div>
+          <div class="qs-label">SATELLITES</div>
+        </div>
+      </div>
+      <div class="qs-card">
+        <div class="qs-icon">⏱</div>
+        <div class="qs-body">
+          <div class="qs-value" id="qs-time">00:00:00</div>
+          <div class="qs-label">FLIGHT TIME</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── CONNECTION + VEHICLE CONTROL ROW ── -->
+    <section class="control-row">
+      <div class="panel glass" id="panel-connection">
+        <div class="panel-header">
+          <span class="panel-icon">⬡</span>
+          <span class="panel-title">MAVLINK CONNECTION</span>
+          <span class="ws-indicator" id="ws-indicator">OFFLINE</span>
+        </div>
+        <div class="conn-meta">
+          <div class="conn-meta-item"><span class="conn-meta-label">SERIAL</span><span class="conn-meta-val">COM18</span></div>
+          <div class="conn-meta-item"><span class="conn-meta-label">BAUD</span><span class="conn-meta-val">9600</span></div>
+          <div class="conn-meta-item"><span class="conn-meta-label">WS</span><span class="conn-meta-val">localhost:8765</span></div>
+        </div>
+        <div class="conn-actions">
+          <button class="btn btn-primary" id="conn-btn" onclick="toggleConnect()" disabled>CONNECT</button>
+          <span class="conn-status" id="conn-status">● DISCONNECTED</span>
+        </div>
+        <div class="mavlog" id="mavlog">
+          <p><span class="log-ts">[SYS]</span> DroneGuard MAVLink Terminal v4 ready.</p>
+        </div>
+      </div>
+
+      <div class="panel glass" id="panel-control">
+        <div class="panel-header">
+          <span class="panel-icon">◈</span>
+          <span class="panel-title">VEHICLE CONTROL</span>
+        </div>
+        <div class="arm-section">
+          <div class="arm-indicator disarmed" id="arm-status">DISARMED</div>
+          <div class="arm-buttons">
+            <button class="btn btn-green" id="arm-btn" onclick="armDrone()" disabled>ARM</button>
+            <button class="btn btn-red" id="disarm-btn" onclick="disarmDrone()" disabled>DISARM</button>
+            <button class="btn btn-amber" id="rtl-btn" onclick="sendRTL()" disabled>RTL</button>
+          </div>
+        </div>
+        <div class="mode-section">
+          <div class="mode-label">FLIGHT MODE <span class="mode-current" id="active-mode-badge">STABILIZE</span></div>
+          <div class="mode-grid">
+            <div class="mode-chip active" onclick="setMode(this)">STABILIZE</div>
+            <div class="mode-chip" onclick="setMode(this)">LOITER</div>
+            <div class="mode-chip" onclick="setMode(this)">ALT HOLD</div>
+            <div class="mode-chip" onclick="setMode(this)">AUTO</div>
+            <div class="mode-chip" onclick="setMode(this)">GUIDED</div>
+            <div class="mode-chip" onclick="setMode(this)">LAND</div>
+            <div class="mode-chip" onclick="setMode(this)">POSHOLD</div>
+            <div class="mode-chip" onclick="setMode(this)">RTL</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ATTITUDE + TELEMETRY ROW ── -->
+    <section class="attitude-row">
+      <div class="panel glass" id="panel-attitude">
+        <div class="panel-header">
+          <span class="panel-icon">◈</span>
+          <span class="panel-title">ATTITUDE INDICATOR</span>
+        </div>
+        <div class="attitude-center">
+          <canvas id="attitude-canvas" width="280" height="280"></canvas>
+        </div>
+        <div class="attitude-values">
+          <div class="att-val-box">
+            <div class="att-val" id="p-roll">0.0°</div>
+            <div class="att-lbl">ROLL</div>
+          </div>
+          <div class="att-val-box">
+            <div class="att-val" id="p-pitch">0.0°</div>
+            <div class="att-lbl">PITCH</div>
+          </div>
+          <div class="att-val-box">
+            <div class="att-val" id="p-yaw">0°</div>
+            <div class="att-lbl">YAW / HDG</div>
+          </div>
+        </div>
+        <canvas id="compass-canvas" width="280" height="56"></canvas>
+      </div>
+
+      <div class="panel glass" id="panel-telemetry">
+        <div class="panel-header">
+          <span class="panel-icon">◈</span>
+          <span class="panel-title">FLIGHT TELEMETRY</span>
+        </div>
+        <table class="tele-table" id="tele-table">
+          <tr><td>Latitude</td><td id="t-lat">--</td></tr>
+          <tr><td>Longitude</td><td id="t-lon">--</td></tr>
+          <tr><td>Altitude (MSL)</td><td id="t-alt">--</td></tr>
+          <tr><td>Rel. Altitude</td><td id="t-ralt">--</td></tr>
+          <tr><td>Ground Speed</td><td id="t-spd">--</td></tr>
+          <tr><td>Air Speed</td><td id="t-aspd">--</td></tr>
+          <tr><td>Heading</td><td id="t-hdg">--</td></tr>
+          <tr><td>Vert. Speed</td><td id="t-vspd">--</td></tr>
+          <tr><td>Battery V</td><td id="t-batt">--</td></tr>
+          <tr><td>Battery %</td><td id="t-bpct">--</td></tr>
+          <tr><td>Current</td><td id="t-curr">--</td></tr>
+          <tr><td>Satellites</td><td id="t-sats">--</td></tr>
+          <tr><td>HDOP</td><td id="t-hdop">--</td></tr>
+          <tr><td>EKF Status</td><td id="t-ekf">--</td></tr>
+          <tr><td>Flight Time</td><td id="t-time">--</td></tr>
+          <tr><td>MAVLink Hz</td><td id="t-hz">--</td></tr>
+        </table>
+      </div>
+
+      <div class="panel glass" id="panel-rc">
+        <div class="panel-header">
+          <span class="panel-icon">◈</span>
+          <span class="panel-title">RC CHANNELS & SPEED</span>
+        </div>
+        <div class="speed-boxes">
+          <div class="speed-box">
+            <div class="speed-val" id="spd-box">0.0 m/s</div>
+            <div class="speed-lbl">GND SPEED</div>
+          </div>
+          <div class="speed-box amber">
+            <div class="speed-val" id="vspd-box">0.0 m/s</div>
+            <div class="speed-lbl">VERT SPEED</div>
+          </div>
+        </div>
+        <div class="rc-section-label">RC CHANNELS (1–8)</div>
+        <div id="rc-bars"></div>
+        <div class="rc-rssi-row">
+          <span class="rc-rssi-label">RC RSSI</span>
+          <span class="rc-rssi-val" id="rc-rssi-val">--</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── IMU GRAPHS ROW ── -->
+    <section class="imu-row">
+      <div class="panel glass" id="panel-gyro">
+        <div class="panel-header">
+          <span class="panel-icon">◈</span>
+          <span class="panel-title">GYROSCOPE — Real-time (rad/s)</span>
+        </div>
+        <div class="imu-chart-wrap">
+          <div class="imu-label"><span>GYR X (Roll rate)</span><span class="imu-val" id="gx-val" style="color:#00d4ff">0.000</span></div>
+          <canvas class="imu-canvas" id="gx-canvas" height="70"></canvas>
+        </div>
+        <div class="imu-chart-wrap">
+          <div class="imu-label"><span>GYR Y (Pitch rate)</span><span class="imu-val" id="gy-val" style="color:#00ff88">0.000</span></div>
+          <canvas class="imu-canvas" id="gy-canvas" height="70"></canvas>
+        </div>
+        <div class="imu-chart-wrap">
+          <div class="imu-label"><span>GYR Z (Yaw rate)</span><span class="imu-val" id="gz-val" style="color:#aa88ff">0.000</span></div>
+          <canvas class="imu-canvas" id="gz-canvas" height="70"></canvas>
+        </div>
+      </div>
+
+      <div class="panel glass" id="panel-accel">
+        <div class="panel-header">
+          <span class="panel-icon">◈</span>
+          <span class="panel-title">ACCELEROMETER — Real-time (m/s²)</span>
+        </div>
+        <div class="imu-chart-wrap">
+          <div class="imu-label"><span>ACC X</span><span class="imu-val" id="ax-val" style="color:#ff6688">0.000</span></div>
+          <canvas class="imu-canvas" id="ax-canvas" height="70"></canvas>
+        </div>
+        <div class="imu-chart-wrap">
+          <div class="imu-label"><span>ACC Y</span><span class="imu-val" id="ay-val" style="color:#ffdd00">0.000</span></div>
+          <canvas class="imu-canvas" id="ay-canvas" height="70"></canvas>
+        </div>
+        <div class="imu-chart-wrap">
+          <div class="imu-label"><span>ACC Z</span><span class="imu-val" id="az-val" style="color:#ff8844">0.000</span></div>
+          <canvas class="imu-canvas" id="az-canvas" height="70"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── GPS MAP ROW ── -->
+    <section class="gps-row">
+      <div class="panel glass full-width" id="panel-gps">
+        <div class="panel-header">
+          <span class="panel-icon">◈</span>
+          <span class="panel-title">GPS POSITION</span>
+          <span class="gps-fix-badge" id="gps-fix-badge">NO FIX</span>
+        </div>
+
+        <div class="gps-sim-banner" id="gps-sim-banner">
+          <div class="sim-red-dot"></div>
+          <span>
+            <strong style="color:#ff3355">GPS SIM</strong> &nbsp;-&nbsp;
+            📍 Trident Academy of Technology, Bhubaneswar, Odisha
+            &nbsp;&nbsp;|&nbsp;&nbsp;
+            <span style="color:rgba(255,100,120,0.7)">20.3403°N, 85.8083°E</span>
+          </span>
+        </div>
+
+        <div class="gps-stats-grid">
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-lat">--</div><div class="gps-stat-lbl">LATITUDE</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-lon">--</div><div class="gps-stat-lbl">LONGITUDE</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-alt">--</div><div class="gps-stat-lbl">ALT MSL (m)</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-sats">--</div><div class="gps-stat-lbl">SATELLITES</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-hdop">--</div><div class="gps-stat-lbl">HDOP</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-spd">--</div><div class="gps-stat-lbl">GND SPEED</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-vspd">--</div><div class="gps-stat-lbl">VERT SPEED</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-ralt">--</div><div class="gps-stat-lbl">ALT REL (m)</div></div>
+        </div>
+        <div id="gps-map"></div>
+        <div class="gps-footer">Live GPS uses MAVLink GPS_RAW_INT / GLOBAL_POSITION_INT &nbsp;|&nbsp; Blue = flight path &nbsp;|&nbsp; Updates every telemetry frame</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ═══ JAVASCRIPT ═══ -->
+  <script src="app.js"></script>
+</body>
+
+</html>
