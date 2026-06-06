@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DroneGuard - Command Center</title>
+  <meta name="description" content="Whitelist-only DroneGuard command center for mapped maintenance scripts.">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;500;600;700;900&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="terminal.css">
+</head>
+
+<body>
+  <div class="ambient-particles" aria-hidden="true">
+    <div class="particle p1"></div>
+    <div class="particle p2"></div>
+    <div class="particle p3"></div>
+    <div class="particle p4"></div>
+    <div class="particle p5"></div>
+    <div class="particle p6"></div>
+  </div>
+
+  <header id="main-header">
+    <div class="header-left">
+      <a class="logo" href="index.html" aria-label="Back to dashboard">
+        <span class="logo-icon">DG</span>
+        DRONE<span class="logo-accent">GUARD</span>
+        <sup class="logo-ver">v4</sup>
+      </a>
+    </div>
+
+    <div class="header-center">
+      <div class="status-pills">
+        <div class="pill" id="backend-pill">
+          <span class="pill-dot"></span>
+          <span class="pill-text">COMMAND SERVER OFFLINE</span>
+        </div>
+        <div class="pill" id="run-pill">
+          <span class="pill-dot"></span>
+          <span class="pill-text">IDLE</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <a class="btn btn-primary nav-btn" href="index.html">DASHBOARD</a>
+      <div class="clock" id="hdr-clock">00:00:00</div>
+    </div>
+  </header>
+
+  <main class="command-shell">
+    <section class="terminal-panel glass">
+      <div class="panel-header">
+        <span class="panel-icon">DG</span>
+        <span class="panel-title">COMMAND CENTER</span>
+        <span class="ws-indicator" id="server-status">OFFLINE</span>
+      </div>
+
+      <div class="command-layout">
+        <section class="terminal-output-wrap">
+          <div class="terminal-toolbar">
+            <span>TERMINAL OUTPUT</span>
+            <button class="mini-btn" id="clear-btn" type="button">CLEAR</button>
+          </div>
+          <pre id="terminal-output" class="terminal-output" aria-live="polite"></pre>
+        </section>
+
+        <aside class="side-panel">
+          <div class="status-card">
+            <div class="status-label">STATUS</div>
+            <div class="status-value" id="command-status">DISCONNECTED</div>
+          </div>
+
+          <div class="command-card">
+            <label for="command-input">COMMAND ID</label>
+            <div class="command-entry">
+              <input id="command-input" type="text" inputmode="numeric" autocomplete="off" placeholder="1" maxlength="16">
+              <button class="btn btn-green" id="run-btn" type="button" disabled>RUN</button>
+            </div>
+          </div>
+
+          <div class="whitelist-card">
+            <div class="side-title">WHITELIST</div>
+            <div id="command-list" class="command-list"></div>
+          </div>
+
+          <div class="history-card">
+            <div class="side-title">COMMAND HISTORY</div>
+            <ol id="history-list" class="history-list"></ol>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <script src="terminal.js"></script>
+</body>
+
+</html>

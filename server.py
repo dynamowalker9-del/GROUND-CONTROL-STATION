@@ -4,17 +4,29 @@ import asyncio
 import json
 import math
 import os
+import sys
 import threading
 import time
+from pathlib import Path
 
 import websockets
 from pymavlink import mavutil
 
-DRONE_CONNECTION = os.getenv("DRONE_CONNECTION", "COM18")
+DRONE_CONNECTION = os.getenv("DRONE_CONNECTION", "COM21")
 DRONE_BAUD = int(os.getenv("DRONE_BAUD", "9600"))
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("WS_PORT", "8765"))
 STREAM_HZ = int(os.getenv("STREAM_HZ", "20"))
+COMMAND_WS_HOST = os.getenv("COMMAND_WS_HOST", "127.0.0.1")
+COMMAND_WS_PORT = int(os.getenv("COMMAND_WS_PORT", "8766"))
+COMMAND_TIMEOUT = int(os.getenv("COMMAND_TIMEOUT", "300"))
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+COMMAND_MAP = {
+    "1": "scripts/scripts1.py",
+    "2": "scripts/scripts2.py",
+    "3": "scripts/scripts3.py",
+}
 
 
 COPTER_MODES = {
@@ -26,20 +38,28 @@ COPTER_MODES = {
 }
 MODE_NAME_TO_ID = {v: k for k, v in COPTER_MODES.items()}
 
-print(f"Connecting to {DRONE_CONNECTION} @ {DRONE_BAUD} baud ...")
-master = mavutil.mavlink_connection(
-    DRONE_CONNECTION, baud=DRONE_BAUD,
-    autoreconnect=True,
-    source_system=255,    
-    source_component=0,
-)
-master.wait_heartbeat(timeout=30)
-print(f"Heartbeat received — SysID={master.target_system}  CompID={master.target_component}")
+# Initialize MAVLink connection with error handling
+master = None
+try:
+    print(f"Connecting to {DRONE_CONNECTION} @ {DRONE_BAUD} baud ...")
+    master = mavutil.mavlink_connection(
+        DRONE_CONNECTION, baud=DRONE_BAUD,
+        autoreconnect=True,
+        source_system=255,    
+        source_component=0,
+    )
+    master.wait_heartbeat(timeout=30)
+    print(f"Heartbeat received — SysID={master.target_system}  CompID={master.target_component}")
+except Exception as e:
+    print(f"[ERROR] Failed to connect to drone at {DRONE_CONNECTION}: {e}")
+    print("[INFO] Server will still start and accept WebSocket connections.")
+    print("[INFO] Telemetry will not be available until drone connects.")
+    master = None
 
 
 def request_streams():
     """Ask ArduPilot to stream all telemetry at the configured rate."""
-    if master.target_system == 0:
+    if master is None or master.target_system == 0:
         return   # not connected yet
     master.mav.request_data_stream_send(
         master.target_system,
@@ -100,6 +120,10 @@ def reader():
     last_stream_req = time.time()
 
     while True:
+        # Wait if drone not connected yet
+        if master is None:
+            time.sleep(1.0)
+            continue
         
         try:
             msg = master.recv_match(blocking=True, timeout=1.0)
@@ -309,6 +333,9 @@ async def handle_command(raw: str):
         if mode_id is None:
             print(f"[cmd] Unknown mode: {mode_name}")
             return
+        if master is None:
+            print(f"[cmd] ERROR: Cannot SET_MODE - drone not connected")
+            return
         master.mav.set_mode_send(
             master.target_system,
             mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
@@ -317,6 +344,9 @@ async def handle_command(raw: str):
         print(f"[cmd] SET_MODE → {mode_name} (id={mode_id})")
 
     elif action == "RTL":
+        if master is None:
+            print(f"[cmd] ERROR: Cannot RTL - drone not connected")
+            return
         mode_id = MODE_NAME_TO_ID.get("RTL", 6)
         master.mav.set_mode_send(
             master.target_system,
@@ -326,6 +356,9 @@ async def handle_command(raw: str):
         print("[cmd] RTL")
 
     elif action == "TAKEOFF":
+        if master is None:
+            print(f"[cmd] ERROR: Cannot TAKEOFF - drone not connected")
+            return
         alt = float(cmd.get("alt", 5.0))
         master.mav.command_long_send(
             master.target_system,
@@ -343,6 +376,9 @@ async def handle_command(raw: str):
 
 def _arm(arm: bool):
     """Send arm/disarm via MAV_CMD_COMPONENT_ARM_DISARM (works on all pymavlink versions)."""
+    if master is None:
+        print(f"[cmd] ERROR: Cannot ARM/DISARM - drone not connected")
+        return
     master.mav.command_long_send(
         master.target_system,
         master.target_component,
@@ -375,6 +411,8 @@ async def _gcs_heartbeat():
     """Send a GCS heartbeat every second so ArduPilot knows a GCS is active."""
     while True:
         await asyncio.sleep(1.0)
+        if master is None:
+            continue
         try:
             master.mav.heartbeat_send(
                 mavutil.mavlink.MAV_TYPE_GCS,
@@ -383,6 +421,113 @@ async def _gcs_heartbeat():
             )
         except Exception:
             pass
+
+
+def command_json(message_type, **payload):
+    return json.dumps({"type": message_type, **payload})
+
+
+def resolve_command_script(command_id):
+    script = COMMAND_MAP.get(command_id)
+    if script is None:
+        raise ValueError(f"Command '{command_id}' is not whitelisted.")
+
+    script_path = (PROJECT_ROOT / script).resolve()
+    try:
+        script_path.relative_to(PROJECT_ROOT)
+    except ValueError as exc:
+        raise ValueError("Whitelisted script resolves outside project root.") from exc
+
+    if not script_path.is_file():
+        raise FileNotFoundError(f"Mapped script does not exist: {script}")
+
+    return script, script_path
+
+
+async def stream_command_output(ws, stream):
+    while True:
+        chunk = await stream.readline()
+        if not chunk:
+            break
+        await ws.send(command_json("output", data=chunk.decode("utf-8", errors="replace")))
+
+
+async def run_whitelisted_command(ws, command_id):
+    script_label, script_path = resolve_command_script(command_id)
+    await ws.send(command_json(
+        "status",
+        state="running",
+        message=f"Running command {command_id}: {script_label}",
+    ))
+
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-u",
+        str(script_path),
+        cwd=str(PROJECT_ROOT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    try:
+        await asyncio.wait_for(stream_command_output(ws, process.stdout), timeout=COMMAND_TIMEOUT)
+        returncode = await asyncio.wait_for(process.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        await ws.send(command_json("error", message=f"Command timed out after {COMMAND_TIMEOUT}s."))
+        return
+
+    await ws.send(command_json(
+        "complete",
+        command=command_id,
+        script=script_label,
+        returncode=returncode,
+    ))
+
+
+async def handle_terminal_message(ws, raw):
+    try:
+        message = json.loads(raw)
+    except json.JSONDecodeError:
+        await ws.send(command_json("error", message="Invalid JSON message."))
+        return
+
+    message_type = message.get("type")
+    if message_type == "list":
+        await ws.send(command_json("catalog", commands=COMMAND_MAP))
+        return
+
+    if message_type != "run":
+        await ws.send(command_json("error", message="Unsupported message type."))
+        return
+
+    command_id = str(message.get("command", "")).strip()
+    if not command_id:
+        await ws.send(command_json("error", message="Missing command ID."))
+        return
+
+    try:
+        await run_whitelisted_command(ws, command_id)
+    except (ValueError, FileNotFoundError) as exc:
+        await ws.send(command_json("error", message=str(exc)))
+    except Exception as exc:
+        await ws.send(command_json("error", message=f"Command executor failed: {exc}"))
+    finally:
+        await ws.send(command_json("status", state="idle", message="IDLE"))
+
+
+async def terminal_ws_handler(ws):
+    addr = getattr(ws, "remote_address", "?")
+    print(f"[terminal-ws] + connected: {addr}")
+    await ws.send(command_json("catalog", commands=COMMAND_MAP))
+    try:
+        async for message in ws:
+            await handle_terminal_message(ws, message)
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        print(f"[terminal-ws] - disconnected: {addr}")
 
 
 
@@ -408,12 +553,19 @@ async def main():
 
     print("=" * 50)
     print("  DroneGuard MAVLink Backend v4")
-    print(f"  WebSocket: ws://{WS_HOST}:{WS_PORT}")
+    print(f"  Telemetry WS: ws://{WS_HOST}:{WS_PORT}")
+    print(f"  Command WS:   ws://{COMMAND_WS_HOST}:{COMMAND_WS_PORT}")
     print(f"  Drone:     {DRONE_CONNECTION} @ {DRONE_BAUD} baud")
     print(f"  Stream:    {STREAM_HZ} Hz")
+    print("  Command whitelist:")
+    for command_id, script in COMMAND_MAP.items():
+        print(f"    {command_id}: {script}")
     print("=" * 50)
 
-    async with websockets.serve(ws_handler, WS_HOST, WS_PORT):
+    async with (
+        websockets.serve(ws_handler, WS_HOST, WS_PORT),
+        websockets.serve(terminal_ws_handler, COMMAND_WS_HOST, COMMAND_WS_PORT),
+    ):
         await asyncio.Future()   # run forever
 
 
