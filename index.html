@@ -53,7 +53,8 @@
     </div>
 
     <div class="header-right">
-      <a class="btn btn-primary nav-btn" href="terminal.html">COMMAND CENTER</a>
+      <a class="btn btn-primary nav-btn" href="terminal.html"><span class="nav-icon">🖥️</span>COMMAND CENTER</a>
+      <a class="btn btn-secondary nav-btn" href="command-corner.html"><span class="nav-icon">🧭</span>CORNER CC</a>
       <div class="hz-badge" id="hz-badge">-- Hz</div>
       <div class="clock" id="hdr-clock">00:00:00</div>
     </div>
@@ -117,7 +118,7 @@
           <span class="ws-indicator" id="ws-indicator">OFFLINE</span>
         </div>
         <div class="conn-meta">
-          <div class="conn-meta-item"><span class="conn-meta-label">SERIAL</span><span class="conn-meta-val">COM18</span></div>
+          <div class="conn-meta-item"><span class="conn-meta-label">SERIAL</span><span class="conn-meta-val">/dev/ttyUSB0</span></div>
           <div class="conn-meta-item"><span class="conn-meta-label">BAUD</span><span class="conn-meta-val">9600</span></div>
           <div class="conn-meta-item"><span class="conn-meta-label">WS</span><span class="conn-meta-val">localhost:8765</span></div>
         </div>
@@ -226,7 +227,7 @@
             <div class="speed-lbl">VERT SPEED</div>
           </div>
         </div>
-        <div class="rc-section-label">RC CHANNELS (1–8)</div>
+        <div class="rc-section-label">RAW RC PWM (CH1–CH8)</div>
         <div id="rc-bars"></div>
         <div class="rc-rssi-row">
           <span class="rc-rssi-label">RC RSSI</span>
@@ -273,40 +274,6 @@
           <div class="imu-label"><span>ACC Z</span><span class="imu-val" id="az-val" style="color:#ff8844">0.000</span></div>
           <canvas class="imu-canvas" id="az-canvas" height="70"></canvas>
         </div>
-      </div>
-    </section>
-
-    <!-- ── GPS MAP ROW ── -->
-    <section class="gps-row">
-      <div class="panel glass full-width" id="panel-gps">
-        <div class="panel-header">
-          <span class="panel-icon">◈</span>
-          <span class="panel-title">GPS POSITION</span>
-          <span class="gps-fix-badge" id="gps-fix-badge">NO FIX</span>
-        </div>
-
-        <div class="gps-sim-banner" id="gps-sim-banner">
-          <div class="sim-red-dot"></div>
-          <span>
-            <strong style="color:#ff3355">GPS SIM</strong> &nbsp;-&nbsp;
-            📍 Trident Academy of Technology, Bhubaneswar, Odisha
-            &nbsp;&nbsp;|&nbsp;&nbsp;
-            <span style="color:rgba(255,100,120,0.7)">20.3403°N, 85.8083°E</span>
-          </span>
-        </div>
-
-        <div class="gps-stats-grid">
-          <div class="gps-stat"><div class="gps-stat-val" id="gps-lat">--</div><div class="gps-stat-lbl">LATITUDE</div></div>
-          <div class="gps-stat"><div class="gps-stat-val" id="gps-lon">--</div><div class="gps-stat-lbl">LONGITUDE</div></div>
-          <div class="gps-stat"><div class="gps-stat-val" id="gps-alt">--</div><div class="gps-stat-lbl">ALT MSL (m)</div></div>
-          <div class="gps-stat"><div class="gps-stat-val" id="gps-sats">--</div><div class="gps-stat-lbl">SATELLITES</div></div>
-          <div class="gps-stat"><div class="gps-stat-val" id="gps-hdop">--</div><div class="gps-stat-lbl">HDOP</div></div>
-          <div class="gps-stat"><div class="gps-stat-val" id="gps-spd">--</div><div class="gps-stat-lbl">GND SPEED</div></div>
-          <div class="gps-stat"><div class="gps-stat-val" id="gps-vspd">--</div><div class="gps-stat-lbl">VERT SPEED</div></div>
-          <div class="gps-stat"><div class="gps-stat-val" id="gps-ralt">--</div><div class="gps-stat-lbl">ALT REL (m)</div></div>
-        </div>
-        <div id="gps-map"></div>
-        <div class="gps-footer">Live GPS uses MAVLink GPS_RAW_INT / GLOBAL_POSITION_INT &nbsp;|&nbsp; Blue = flight path &nbsp;|&nbsp; Updates every telemetry frame</div>
       </div>
     </section>
 
