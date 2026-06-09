@@ -1,3 +1,4 @@
+(function() {
 const COMMAND_WS_PORT = 8766;
 const MAX_TERMINAL_CHARS = 120000;
 const MAX_HISTORY = 30;
@@ -217,3 +218,4 @@ function escapeHtml(value) {
     "'": '&#39;',
   }[char]));
 }
+})();
