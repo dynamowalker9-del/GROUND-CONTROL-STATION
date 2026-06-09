@@ -1,8 +1,9 @@
 
- 
+
 import asyncio
 import json
 import math
+import glob
 import os
 import sys
 import threading
@@ -12,11 +13,29 @@ from pathlib import Path
 import websockets
 from pymavlink import mavutil
 
-DRONE_CONNECTION = os.getenv("DRONE_CONNECTION", "COM21")
-DRONE_BAUD = int(os.getenv("DRONE_BAUD", "9600"))
+
+def discover_drone_connection() -> str:
+    """Auto-detect a Linux serial device for the drone connection."""
+    serial_by_id = Path("/dev/serial/by-id")
+    if serial_by_id.exists():
+        for entry in sorted(serial_by_id.iterdir()):
+            if entry.is_symlink() or entry.is_char_device():
+                return str(entry)
+
+    for pattern in ("/dev/ttyACM*", "/dev/ttyUSB*", "/dev/ttyAMA*", "/dev/ttyS*"):
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            return matches[0]
+
+    return "/dev/ttyUSB0"
+
+
+DRONE_CONNECTION = os.getenv("DRONE_CONNECTION") or discover_drone_connection()
+DRONE_BAUD = int(os.getenv("DRONE_BAUD", "57600"))
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("WS_PORT", "8765"))
 STREAM_HZ = int(os.getenv("STREAM_HZ", "20"))
+RC_STREAM_HZ = int(os.getenv("RC_STREAM_HZ", "50"))
 COMMAND_WS_HOST = os.getenv("COMMAND_WS_HOST", "127.0.0.1")
 COMMAND_WS_PORT = int(os.getenv("COMMAND_WS_PORT", "8766"))
 COMMAND_TIMEOUT = int(os.getenv("COMMAND_TIMEOUT", "300"))
@@ -45,7 +64,7 @@ try:
     master = mavutil.mavlink_connection(
         DRONE_CONNECTION, baud=DRONE_BAUD,
         autoreconnect=True,
-        source_system=255,    
+        source_system=255,
         source_component=0,
     )
     master.wait_heartbeat(timeout=30)
@@ -61,6 +80,8 @@ def request_streams():
     """Ask ArduPilot to stream all telemetry at the configured rate."""
     if master is None or master.target_system == 0:
         return   # not connected yet
+
+    # Request all data streams
     master.mav.request_data_stream_send(
         master.target_system,
         master.target_component,
@@ -68,7 +89,30 @@ def request_streams():
         STREAM_HZ,
         1,    # start
     )
-    print(f"Data streams requested @ {STREAM_HZ} Hz")
+
+    # Explicitly request RC channels (some autopilots need this)
+    master.mav.request_data_stream_send(
+        master.target_system,
+        master.target_component,
+        mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        RC_STREAM_HZ,
+        1,    # start
+    )
+
+    try:
+        master.mav.command_long_send(
+            master.target_system,
+            master.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            0,
+            mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS,
+            int(1_000_000 / max(1, RC_STREAM_HZ)),
+            0, 0, 0, 0, 0,
+        )
+    except (AttributeError, TypeError):
+        pass
+
+    print(f"Data streams requested @ {STREAM_HZ} Hz; RC_CHANNELS @ {RC_STREAM_HZ} Hz")
 
 request_streams()
 
@@ -89,10 +133,12 @@ telem = {
     "heading_deg": 0.0, "vspeed":     0.0,
     # Battery
     "batt_voltage": 0.0, "batt_current": 0.0, "batt_pct": -1,
-    # RC Channels (transmitter inputs) — 1500 = centre
-    "rc1": 0, "rc2": 0, "rc3": 0, "rc4": 0,
-    "rc5": 0, "rc6": 0, "rc7": 0, "rc8": 0,
+    # RC Channels (raw transmitter PWM) — None until the first real packet
+    "rc1": None, "rc2": None, "rc3": None, "rc4": None,
+    "rc5": None, "rc6": None, "rc7": None, "rc8": None,
     "rc_rssi": 0,
+    # RC status
+    "rc_count_updates": 0, "rc_last_update_ms": 0,
     # Status
     "flight_mode": "UNKNOWN", "armed": False, "ekf_ok": False,
     # Timestamp
@@ -100,6 +146,7 @@ telem = {
     "connection": DRONE_CONNECTION,
     "baud": DRONE_BAUD,
     "stream_hz": STREAM_HZ,
+    "rc_stream_hz": RC_STREAM_HZ,
 }
 lock = threading.Lock()
 
@@ -124,7 +171,7 @@ def reader():
         if master is None:
             time.sleep(1.0)
             continue
-        
+
         try:
             msg = master.recv_match(blocking=True, timeout=1.0)
         except Exception as e:
@@ -132,7 +179,7 @@ def reader():
             time.sleep(0.5)
             continue
 
-        
+
         if msg is None:
             if time.time() - last_stream_req > 5.0:
                 request_streams()
@@ -161,14 +208,14 @@ def reader():
                 telem["raw_gy"] = round(msg.pitchspeed, 5)
                 telem["raw_gz"] = round(msg.yawspeed,   5)
 
-          
+
             elif mtype in ("RAW_IMU", "SCALED_IMU2"):
                 # RAW_IMU/SCALED_IMU acceleration is in milli-g; display expects m/s^2.
                 telem["raw_ax"] = round(msg.xacc * 9.80665 / 1000.0, 4)
                 telem["raw_ay"] = round(msg.yacc * 9.80665 / 1000.0, 4)
                 telem["raw_az"] = round(msg.zacc * 9.80665 / 1000.0, 4)
 
-            
+
             elif mtype == "HIGHRES_IMU":
                 telem["raw_ax"] = round(msg.xacc,  4)
                 telem["raw_ay"] = round(msg.yacc,  4)
@@ -177,33 +224,33 @@ def reader():
                 telem["raw_gy"] = round(msg.ygyro, 5)
                 telem["raw_gz"] = round(msg.zgyro, 5)
 
-            
+
             elif mtype == "GLOBAL_POSITION_INT":
                 la = msg.lat / 1e7
                 lo = msg.lon / 1e7
-               
+
                 if valid_coord(la, lo):
                     telem["lat"] = round(la, 7)
                     telem["lon"] = round(lo, 7)
                 telem["alt_msl"] = round(msg.alt / 1000.0, 2)
                 telem["alt_rel"] = round(msg.relative_alt / 1000.0, 2)
-                
+
                 if msg.hdg != 65535:
                     telem["heading_deg"] = round(msg.hdg / 100.0, 1)
-               
+
                 vx = msg.vx / 100.0
                 vy = msg.vy / 100.0
                 telem["groundspeed"] = round(math.sqrt(vx*vx + vy*vy), 3)
-                
+
                 telem["vspeed"] = round(-msg.vz / 100.0, 3)
 
-            
+
             elif mtype == "GPS_RAW_INT":
                 telem["gps_fix"]    = msg.fix_type
                 telem["satellites"] = msg.satellites_visible
-                
+
                 telem["hdop"] = round(msg.eph / 100.0, 2) if msg.eph != 65535 else 99.0
-                
+
                 if msg.fix_type >= 2:
                     la = msg.lat / 1e7
                     lo = msg.lon / 1e7
@@ -211,7 +258,7 @@ def reader():
                         telem["lat"] = round(la, 7)
                         telem["lon"] = round(lo, 7)
 
-           
+
             elif mtype == "VFR_HUD":
                 telem["airspeed"]    = round(msg.airspeed, 2)
                 telem["groundspeed"] = round(msg.groundspeed, 2)
@@ -220,7 +267,7 @@ def reader():
                 telem["alt_msl"]     = round(msg.alt, 2)
 
             elif mtype == "SYS_STATUS":
-             
+
                 if msg.voltage_battery != 65535:
                     telem["batt_voltage"] = round(msg.voltage_battery / 1000.0, 3)
                 if msg.current_battery >= 0:
@@ -232,12 +279,12 @@ def reader():
                 if msg.id == 0:
                     if msg.battery_remaining >= 0:
                         telem["batt_pct"] = msg.battery_remaining
-                    
+
                     valid_v = [v for v in msg.voltages if v != 65535]
                     if valid_v:
                         telem["batt_voltage"] = round(sum(valid_v) / 1000.0, 3)
 
-           
+
             elif mtype == "HEARTBEAT":
                 if (msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID and
                         msg.type != mavutil.mavlink.MAV_TYPE_GCS):
@@ -247,9 +294,9 @@ def reader():
                         msg.custom_mode, f"MODE_{msg.custom_mode}"
                     )
 
-     
+
             elif mtype == "EKF_STATUS_REPORT":
-              
+
                 f = msg.flags
                 ATTITUDE_OK  = (1 << 0)
                 VEL_HORIZ_OK = (1 << 1)
@@ -258,6 +305,7 @@ def reader():
 
             # ── RC Channels from transmitter ─────────────────────
             elif mtype == "RC_CHANNELS":
+                # Primary RC input source from receiver
                 telem["rc1"] = msg.chan1_raw
                 telem["rc2"] = msg.chan2_raw
                 telem["rc3"] = msg.chan3_raw
@@ -267,9 +315,11 @@ def reader():
                 telem["rc7"] = msg.chan7_raw
                 telem["rc8"] = msg.chan8_raw
                 telem["rc_rssi"] = msg.rssi
+                telem["rc_count_updates"] += 1
+                telem["rc_last_update_ms"] = int(time.time() * 1000)
 
             elif mtype == "RC_CHANNELS_RAW":
-                # Fallback for older firmwares that send RC_CHANNELS_RAW
+                # Fallback for older firmwares that send RC_CHANNELS_RAW instead
                 telem["rc1"] = msg.chan1_raw
                 telem["rc2"] = msg.chan2_raw
                 telem["rc3"] = msg.chan3_raw
@@ -279,19 +329,21 @@ def reader():
                 telem["rc7"] = msg.chan7_raw
                 telem["rc8"] = msg.chan8_raw
                 telem["rc_rssi"] = msg.rssi
+                telem["rc_count_updates"] += 1
+                telem["rc_last_update_ms"] = int(time.time() * 1000)
 
             elif mtype == "SERVO_OUTPUT_RAW":
                 # Also capture servo outputs as fallback RC display
-                # Only use if no RC_CHANNELS data has arrived yet
-                if telem["rc1"] == 0:
+                # Only update if we haven't received real RC data yet this session
+                if telem["rc_count_updates"] == 0:
                     telem["rc1"] = msg.servo1_raw
                     telem["rc2"] = msg.servo2_raw
                     telem["rc3"] = msg.servo3_raw
                     telem["rc4"] = msg.servo4_raw
-                    telem["rc5"] = getattr(msg, 'servo5_raw', 0)
-                    telem["rc6"] = getattr(msg, 'servo6_raw', 0)
-                    telem["rc7"] = getattr(msg, 'servo7_raw', 0)
-                    telem["rc8"] = getattr(msg, 'servo8_raw', 0)
+                    telem["rc5"] = getattr(msg, 'servo5_raw', 1000)
+                    telem["rc6"] = getattr(msg, 'servo6_raw', 1000)
+                    telem["rc7"] = getattr(msg, 'servo7_raw', 1000)
+                    telem["rc8"] = getattr(msg, 'servo8_raw', 1000)
 
 
 threading.Thread(target=reader, daemon=True, name="mav-reader").start()
@@ -299,7 +351,7 @@ threading.Thread(target=reader, daemon=True, name="mav-reader").start()
 
 
 async def handle_command(raw: str):
-    
+
     try:
         cmd = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
@@ -320,7 +372,7 @@ async def handle_command(raw: str):
 
     elif action in ("SET_MODE", "SETMODE"):
         raw_name = cmd.get("mode", "").strip().upper()
-        
+
         label_map = {
             "ALT HOLD":      "ALT_HOLD",
             "ALT_HOLD":      "ALT_HOLD",
@@ -393,8 +445,9 @@ def _arm(arm: bool):
 
 async def _send_loop(ws):
     """Push telemetry snapshots to the browser at the configured stream rate."""
+    send_interval = 1.0 / max(1, STREAM_HZ, RC_STREAM_HZ)
     while True:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(send_interval)
         with lock:
             payload = dict(telem)
         try:
@@ -548,7 +601,7 @@ async def ws_handler(ws):
 
 
 async def main():
-    
+
     asyncio.create_task(_gcs_heartbeat())
 
     print("=" * 50)
@@ -557,6 +610,7 @@ async def main():
     print(f"  Command WS:   ws://{COMMAND_WS_HOST}:{COMMAND_WS_PORT}")
     print(f"  Drone:     {DRONE_CONNECTION} @ {DRONE_BAUD} baud")
     print(f"  Stream:    {STREAM_HZ} Hz")
+    print(f"  RC stream: {RC_STREAM_HZ} Hz raw PWM")
     print("  Command whitelist:")
     for command_id, script in COMMAND_MAP.items():
         print(f"    {command_id}: {script}")
