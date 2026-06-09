@@ -19,7 +19,7 @@ let batt = 0, battI = 0, bpct = -1, ekfOk = false;
 let gpsFix = 0, sats = 0, hdop = 99;
 
 // RC channels from transmitter (1-8)
-const rcChannels = { 1: 1500, 2: 1500, 3: 1500, 4: 1500, 5: 1500, 6: 1500, 7: 1500, 8: 1500 };
+const rcChannels = { 1: null, 2: null, 3: null, 4: null, 5: null, 6: null, 7: null, 8: null };
 let rcRssi = 0;
 
 // IMU graph buffers
@@ -45,8 +45,34 @@ const LERP = 0.18;
 // ══════════════════════════════════════════════════════════════
 
 document.addEventListener('DOMContentLoaded', () => {
-  initRcBars();
-  initGpsMap();
+  const rcBarsEl = document.getElementById('rc-bars');
+  if (rcBarsEl) initRcBars();
+
+  // Dynamically create the fullscreen GPS map container if this page has a GPS panel
+  const hasGpsPanel = Array.from(document.querySelectorAll('.panel, .corner-panel')).some(el => {
+    const title = el.querySelector('.panel-title');
+    return title && title.textContent && title.textContent.toUpperCase().includes('GPS');
+  });
+
+  let gpsMapEl = document.getElementById('gps-map');
+  if (hasGpsPanel) {
+    if (!gpsMapEl) {
+      gpsMapEl = document.createElement('div');
+      gpsMapEl.id = 'gps-map';
+      document.body.appendChild(gpsMapEl);
+    }
+    initGpsMap();
+  }
+
+  // Map focus toggle to allow panning under overlays
+  const mapFocusBtn = document.getElementById('map-focus-btn');
+  if (mapFocusBtn) {
+    mapFocusBtn.addEventListener('click', () => {
+      const active = document.body.classList.toggle('map-focus');
+      setMapInteraction(active);
+    });
+  }
+
   setInterval(updateClock, 1000);
   updateClock();
   connectBackend();
@@ -63,9 +89,9 @@ function initRcBars() {
     html += `<div class="reading-row">
       <div class="reading-label">CH${i}</div>
       <div class="reading-bar-wrap">
-        <div class="reading-bar" id="rc${i}" style="width:50%;background:var(--accent)"></div>
+        <div class="reading-bar" id="rc${i}" style="width:0;background:var(--accent)"></div>
       </div>
-      <div class="reading-val" id="rc-v${i}" style="color:var(--accent)">1500</div>
+      <div class="reading-val" id="rc-v${i}" style="color:var(--accent)">--</div>
     </div>`;
   }
   container.innerHTML = html;
@@ -85,6 +111,7 @@ function updateClock() {
 
 function mavLog(msg, cls = '') {
   const logEl = document.getElementById('mavlog');
+  if (!logEl) return;
   const p = document.createElement('p');
   p.className = cls;
   p.innerHTML = `<span class="log-ts">[${new Date().toTimeString().slice(0, 8)}]</span> ${msg}`;
@@ -100,12 +127,14 @@ function wsSend(data) {
 
 function setWsIndicator(text, cls) {
   const el = document.getElementById('ws-indicator');
+  if (!el) return;
   el.textContent = text;
   el.className = 'ws-indicator ' + (cls || '');
 }
 
 function setPill(id, text, cls) {
   const el = document.getElementById(id);
+  if (!el) return;
   el.className = 'pill ' + (cls || '');
   const txt = el.querySelector('.pill-text');
   if (txt) txt.textContent = text;
@@ -130,9 +159,12 @@ function connectBackend() {
     setPill('pill-ws', 'BACKEND CONNECTED', 'active');
     mavLog('WebSocket connected to server.py.', 'ok');
     mavLog('Waiting for live MAVLink telemetry from backend.', 'ok');
-    document.getElementById('conn-btn').disabled = false;
-    const b = document.getElementById('gps-sim-banner');
-    if (b) b.style.display = 'none';
+    const connBtn = document.getElementById('conn-btn');
+    if (connBtn) {
+      connBtn.disabled = false;
+    } else {
+      droneConnected = true;
+    }
   };
 
   ws.onmessage = (evt) => {
@@ -173,16 +205,20 @@ function connectBackend() {
     // Armed status
     if (typeof d.armed === 'boolean') {
       droneArmed = d.armed;
-      document.getElementById('arm-status').textContent = droneArmed ? 'ARMED' : 'DISARMED';
-      document.getElementById('arm-status').className = 'arm-indicator ' + (droneArmed ? 'armed' : 'disarmed');
+      const armStatusEl = document.getElementById('arm-status');
+      if (armStatusEl) armStatusEl.textContent = droneArmed ? 'ARMED' : 'DISARMED';
+      if (armStatusEl) armStatusEl.className = 'arm-indicator ' + (droneArmed ? 'armed' : 'disarmed');
 
       const pillArmed = document.getElementById('pill-armed');
-      if (droneArmed) {
-        pillArmed.style.display = 'flex';
-        pillArmed.className = 'pill danger';
-        pillArmed.querySelector('.pill-text').textContent = 'ARMED';
-      } else {
-        pillArmed.style.display = 'none';
+      if (pillArmed) {
+        if (droneArmed) {
+          pillArmed.style.display = 'flex';
+          pillArmed.className = 'pill danger';
+          const pillText = pillArmed.querySelector('.pill-text');
+          if (pillText) pillText.textContent = 'ARMED';
+        } else {
+          pillArmed.style.display = 'none';
+        }
       }
     }
 
@@ -192,9 +228,10 @@ function connectBackend() {
     // RC Channels
     for (let i = 1; i <= 8; i++) {
       const key = 'rc' + i;
-      if (typeof d[key] === 'number' && d[key] > 0) rcChannels[i] = d[key];
+      if (Number.isFinite(d[key]) && d[key] > 0) rcChannels[i] = Math.trunc(d[key]);
     }
     if (typeof d.rc_rssi === 'number') rcRssi = d.rc_rssi;
+    updateRcBars();
 
     // Gyro rates
     if (typeof d.raw_gx === 'number') gx = d.raw_gx;
@@ -239,7 +276,8 @@ function enterSimMode() {
   setWsIndicator('SIM MODE', 'sim');
   setPill('pill-ws', 'SIM MODE', 'warn');
   mavLog('Simulation mode active. Start server.py for live drone data.', 'err');
-  document.getElementById('conn-btn').disabled = false;
+  const connBtn = document.getElementById('conn-btn');
+  if (connBtn) connBtn.disabled = false;
   const b = document.getElementById('gps-sim-banner');
   if (b) b.style.display = 'flex';
 }
@@ -408,12 +446,11 @@ function renderTelemetryUI() {
   // Hz badge
   _set('hz-badge', wsConnected ? `${streamHz} Hz` : '-- Hz');
 
-  updateRcBars();
 }
 
 function updateRcBars() {
   for (let i = 1; i <= 8; i++) {
-    const val = rcChannels[i] || 1500;
+    const val = Number.isFinite(rcChannels[i]) ? Math.trunc(rcChannels[i]) : 0;
     const pct = Math.max(0, Math.min(100, ((val - 1000) / 1000) * 100));
     const bar = document.getElementById('rc' + i);
     const lbl = document.getElementById('rc-v' + i);
@@ -423,7 +460,7 @@ function updateRcBars() {
       else if (val < 1100 || val > 1900) bar.style.background = 'var(--amber)';
       else bar.style.background = 'var(--accent)';
     }
-    if (lbl) lbl.textContent = val;
+    if (lbl) lbl.textContent = val > 0 ? String(val) : '--';
   }
   const rssiEl = document.getElementById('rc-rssi-val');
   if (rssiEl) rssiEl.textContent = rcRssi ? rcRssi : '--';
@@ -439,6 +476,8 @@ const TRIDENT_LAT = 20.3403, TRIDENT_LON = 85.8083;
 let simLocationMarker = null;
 let mapInitialized = false;
 let lastMapMode = 'sim';
+let leafletLoadRetryTimer = null;
+let leafletLoadAttempts = 0;
 
 function hasValidGps() {
   return Number.isFinite(lat) && Number.isFinite(lon)
@@ -449,12 +488,29 @@ function hasValidGps() {
 
 function initGpsMap() {
   if (mapInitialized) return;
-  mapInitialized = true;
   if (typeof L === 'undefined') {
-    mavLog('Leaflet map library did not load. Check internet access for the CDN.', 'err');
+    if (leafletLoadAttempts === 0) {
+      const message = 'Leaflet is not available yet; delaying GPS map initialization.';
+      console.error(message);
+      mavLog(message, 'err');
+    }
+    if (leafletLoadAttempts < 20 && !leafletLoadRetryTimer) {
+      leafletLoadAttempts += 1;
+      leafletLoadRetryTimer = setTimeout(() => {
+        leafletLoadRetryTimer = null;
+        initGpsMap();
+      }, 250);
+    }
     return;
   }
 
+  const gpsMapEl = document.getElementById('gps-map');
+  if (!gpsMapEl) {
+    console.error('Cannot initialize Leaflet: #gps-map is missing.');
+    return;
+  }
+
+  mapInitialized = true;
   leafletMap = L.map('gps-map', { zoomControl: true, attributionControl: false }).setView([TRIDENT_LAT, TRIDENT_LON], 17);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(leafletMap);
 
@@ -493,6 +549,34 @@ function initGpsMap() {
   }).addTo(leafletMap);
 
   flightPath = L.polyline([], { color: '#00d4ff', weight: 2, opacity: 0.7 }).addTo(leafletMap);
+
+  // Force Leaflet to recalculate size after any layout/paint so it renders fullscreen
+  setTimeout(() => {
+    try { leafletMap.invalidateSize(true); } catch (e) { }
+  }, 250);
+
+  setMapInteraction(document.body.classList.contains('map-focus'));
+}
+
+function setMapInteraction(active) {
+  const mapFocusBtn = document.getElementById('map-focus-btn');
+  if (mapFocusBtn) {
+    mapFocusBtn.textContent = active ? 'Exit Map' : 'Focus Map';
+    mapFocusBtn.setAttribute('aria-pressed', String(active));
+  }
+  if (!leafletMap) return;
+
+  try {
+    if (active) {
+      leafletMap.dragging.enable();
+      leafletMap.scrollWheelZoom.enable();
+    } else {
+      leafletMap.dragging.disable();
+      leafletMap.scrollWheelZoom.disable();
+    }
+  } catch (error) {
+    console.error('Unable to update Leaflet interaction state.', error);
+  }
 }
 
 function updateGpsMap() {
@@ -501,6 +585,8 @@ function updateGpsMap() {
     initGpsMap();
   }
   if (!leafletMap) return;
+  // Ensure the map layout is up-to-date (fixes small/boxed initial render)
+  try { leafletMap.invalidateSize(); } catch (e) { }
   if (!hasValidGps()) {
     droneMarker.setPopupContent(
       `<b style="color:#ff3355">DRONE - NO VALID GPS</b><br>
@@ -545,6 +631,13 @@ function updateGpsMap() {
     leafletMap.setView(pos, Math.max(leafletMap.getZoom(), 17));
   }
 }
+
+// Keep the map responsive when the window changes size
+window.addEventListener('resize', () => {
+  if (leafletMap) {
+    try { leafletMap.invalidateSize(); } catch (e) { }
+  }
+});
 
 
 // ══════════════════════════════════════════════════════════════
