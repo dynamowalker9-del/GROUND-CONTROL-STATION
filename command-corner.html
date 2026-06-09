@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DroneGuard - Corner Command Center</title>
+  <meta name="description" content="Mini command center for fast access from the dashboard corner.">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;500;600;700;900&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="terminal.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <link rel="stylesheet" href="style.css">
+  <style>
+    body {
+      min-height: 100vh;
+      background: radial-gradient(circle at top left, rgba(0,212,255,0.12), transparent 38%),
+                  radial-gradient(circle at bottom right, rgba(255,51,85,0.08), transparent 30%),
+                  #020509;
+    }
+    .command-shell {
+      padding: 20px 24px 40px;
+      min-height: 100vh;
+      position: relative;
+      z-index: 1001;
+    }
+    .corner-grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) minmax(420px, 1fr);
+      gap: 22px;
+      align-items: start;
+      margin: 0 auto;
+      max-width: 1320px;
+      position: relative;
+      z-index: 1002;
+    }
+    @media (max-width: 1120px) {
+      .corner-grid { grid-template-columns: 1fr; }
+    }
+    .corner-panel {
+      width: 360px;
+      min-height: 160px;
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      margin: 0;
+      padding: 18px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(6, 12, 24, 0.72);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(6px);
+      z-index: 1005;
+    }
+    .corner-panel::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(0,212,255,0.05), transparent 40%, rgba(255,51,85,0.05));
+      pointer-events: none;
+    }
+    .panel-header {
+      position: relative;
+      z-index: 1;
+    }
+    .corner-panel .terminal-output-wrap {
+      max-height: 240px;
+      overflow-y: auto;
+    }
+    .corner-panel .side-panel {
+      display: none;
+    }
+    .corner-footer {
+      margin-top: 18px;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      line-height: 1.6;
+    }
+    .corner-panel .command-entry {
+      gap: 8px;
+    }
+    .corner-panel .command-list,
+    .corner-panel .history-list {
+      display: none;
+    }
+    .panel-icon {
+      font-size: 1.05rem;
+    }
+    .panel-title {
+      font-size: 0.76rem;
+    }
+    .logo {
+      display: inline-flex;
+      gap: 6px;
+    }
+    /* Make the GPS panel float on top of the fullscreen map */
+    .panel.glass {
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      width: 480px;
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+      margin: 0;
+      padding: 18px;
+      border-radius: 14px;
+      background: rgba(6,12,24,0.36);
+      border: 1px solid rgba(255,255,255,0.06);
+      z-index: 1004;
+      backdrop-filter: blur(4px);
+    }
+    .gps-sim-banner { z-index: 1006; position: relative }
+    .gps-stats-grid { z-index: 1006; position: relative }
+  </style>
+</head>
+
+<body class="command-corner-page">
+  <div class="ambient-particles" aria-hidden="true">
+    <div class="particle p1"></div>
+    <div class="particle p2"></div>
+    <div class="particle p3"></div>
+    <div class="particle p4"></div>
+    <div class="particle p5"></div>
+    <div class="particle p6"></div>
+  </div>
+
+  <header id="main-header">
+    <div class="header-left">
+      <a class="logo" href="index.html" aria-label="Back to dashboard">
+        <span class="logo-icon">◈</span>
+        DRONE<span class="logo-accent">GUARD</span>
+        <sup class="logo-ver">v4</sup>
+      </a>
+    </div>
+    <div class="header-center">
+      <div class="status-pills">
+        <div class="pill" id="backend-pill">
+          <span class="pill-dot"></span>
+          <span class="pill-text">COMMAND SERVER OFFLINE</span>
+        </div>
+      </div>
+    </div>
+    <div class="header-right">
+      <a class="btn btn-primary nav-btn" href="terminal.html"><span class="nav-icon">🖥️</span>FULL CENTER</a>
+      <div class="clock" id="hdr-clock">00:00:00</div>
+    </div>
+  </header>
+
+  <main class="command-shell">
+    <div class="corner-grid">
+      <section class="corner-panel glass">
+        <div class="panel-header">
+          <span class="panel-icon">🧭</span>
+          <span class="panel-title">MINI COMMAND CENTER</span>
+          <span id="server-status" class="ws-indicator live">LIVE READY</span>
+        </div>
+        <div class="terminal-output-wrap">
+          <div class="terminal-toolbar">
+            <span>COMMAND SUMMARY</span>
+            <button class="mini-btn" id="clear-btn" type="button">CLEAR</button>
+          </div>
+          <pre id="terminal-output" class="terminal-output" aria-live="polite"></pre>
+        </div>
+        <div class="status-card" style="margin:18px 0 12px; padding: 14px; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; background: rgba(0,0,0,0.24);">
+          <div class="status-label">STATUS</div>
+          <div class="status-value" id="command-status">DISCONNECTED</div>
+        </div>
+        <div class="command-card" style="margin-top:0;">
+          <label for="command-input">QUICK COMMAND</label>
+          <div class="command-entry">
+            <input id="command-input" type="text" inputmode="numeric" autocomplete="off" placeholder="1" maxlength="16">
+            <button class="btn btn-green" id="run-btn" type="button" disabled>RUN</button>
+          </div>
+        </div>
+        <div id="command-list" class="command-list" style="display:none;"></div>
+        <ol id="history-list" class="history-list" style="display:none;"></ol>
+        <div class="corner-footer">
+          Use this mini page for fast access to command flow and status.
+          Real GPS tracking is shown alongside.
+        </div>
+      </section>
+
+      <section class="panel glass full-width" style="padding:18px 20px;">
+        <div class="panel-header">
+          <span class="panel-icon">🛰️</span>
+          <span class="panel-title">GPS POSITION</span>
+          <span class="gps-fix-badge" id="gps-fix-badge">NO FIX</span>
+        </div>
+
+        <div class="gps-sim-banner" id="gps-sim-banner">
+          <div class="sim-red-dot"></div>
+          <span>
+            <strong style="color:#ff3355">GPS SIM</strong> &nbsp;-&nbsp;
+            📍 Trident Academy of Technology, Bhubaneswar, Odisha
+            &nbsp;&nbsp;|&nbsp;&nbsp;
+            <span style="color:rgba(255,100,120,0.7)">20.3403°N, 85.8083°E</span>
+          </span>
+        </div>
+
+        <div class="gps-stats-grid">
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-lat">--</div><div class="gps-stat-lbl">LATITUDE</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-lon">--</div><div class="gps-stat-lbl">LONGITUDE</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-alt">--</div><div class="gps-stat-lbl">ALT MSL (m)</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-sats">--</div><div class="gps-stat-lbl">SATELLITES</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-hdop">--</div><div class="gps-stat-lbl">HDOP</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-spd">--</div><div class="gps-stat-lbl">GND SPEED</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-vspd">--</div><div class="gps-stat-lbl">VERT SPEED</div></div>
+          <div class="gps-stat"><div class="gps-stat-val" id="gps-ralt">--</div><div class="gps-stat-lbl">ALT REL (m)</div></div>
+        </div>
+
+        <!-- gps-map moved out to body for true fullscreen rendering -->
+        <div class="gps-footer">Live GPS uses MAVLink GPS_RAW_INT / GLOBAL_POSITION_INT &nbsp;|&nbsp; Blue = flight path &nbsp;|&nbsp; Updates every telemetry frame</div>
+      </section>
+    </div>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="app.js"></script>
+  <script src="terminal.js"></script>
+
+  <button class="map-focus-btn" id="map-focus-btn" title="Toggle map interaction">Focus Map</button>
+</body>
+
+</html>
