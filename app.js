@@ -1,6 +1,6 @@
 /* ══════════════════════════════════════════════════════════════
-   DroneGuard v4 — MAVLink Telemetry Dashboard
-   Pure JavaScript — WebSocket client, IMU/Attitude rendering,
+   DroneGuard v4 - MAVLink Telemetry Dashboard
+   Pure JavaScript - WebSocket client, IMU/Attitude rendering,
    GPS map, vehicle control, RC channels, simulation fallback
    ══════════════════════════════════════════════════════════════ */
 
@@ -39,6 +39,33 @@ Object.keys(smoothBufs).forEach(k => { smoothBufs[k] = Array(SMOOTH_LEN).fill(0)
 
 const LERP = 0.18;
 
+// Drone parameter setup state
+let droneParameters = [];
+let parameterSource = '--';
+let parameterLastUpdate = null;
+
+const PARAM_RENDER_LIMIT = 250;
+const SIM_PARAMETERS = [
+  { name: 'ARMING_CHECK', value: 1, type: 6, index: 0, count: 18 },
+  { name: 'BATT_ARM_VOLT', value: 14.0, type: 9, index: 1, count: 18 },
+  { name: 'BATT_LOW_VOLT', value: 13.8, type: 9, index: 2, count: 18 },
+  { name: 'BATT_CRT_VOLT', value: 13.2, type: 9, index: 3, count: 18 },
+  { name: 'FS_THR_ENABLE', value: 1, type: 6, index: 4, count: 18 },
+  { name: 'FS_GCS_ENABLE', value: 1, type: 6, index: 5, count: 18 },
+  { name: 'RTL_ALT', value: 1500, type: 6, index: 6, count: 18 },
+  { name: 'RTL_SPEED', value: 500, type: 6, index: 7, count: 18 },
+  { name: 'GPS_TYPE', value: 1, type: 6, index: 8, count: 18 },
+  { name: 'GPS_HDOP_GOOD', value: 140, type: 6, index: 9, count: 18 },
+  { name: 'RC_SPEED', value: 490, type: 6, index: 10, count: 18 },
+  { name: 'RC_OPTIONS', value: 0, type: 6, index: 11, count: 18 },
+  { name: 'MOT_SPIN_ARM', value: 0.1, type: 9, index: 12, count: 18 },
+  { name: 'MOT_THST_EXPO', value: 0.65, type: 9, index: 13, count: 18 },
+  { name: 'ATC_ANG_RLL_P', value: 4.5, type: 9, index: 14, count: 18 },
+  { name: 'ATC_ANG_PIT_P', value: 4.5, type: 9, index: 15, count: 18 },
+  { name: 'EK3_ENABLE', value: 1, type: 6, index: 16, count: 18 },
+  { name: 'SERIAL1_BAUD', value: 57, type: 6, index: 17, count: 18 },
+];
+
 
 // ══════════════════════════════════════════════════════════════
 // INIT
@@ -47,6 +74,7 @@ const LERP = 0.18;
 document.addEventListener('DOMContentLoaded', () => {
   const rcBarsEl = document.getElementById('rc-bars');
   if (rcBarsEl) initRcBars();
+  initParameterPanel();
 
   // Dynamically create the fullscreen GPS map container if this page has a GPS panel
   const hasGpsPanel = Array.from(document.querySelectorAll('.panel, .corner-panel')).some(el => {
@@ -148,9 +176,45 @@ function connectBackend() {
   const wsHost = window.location.hostname && window.location.protocol !== 'file:'
     ? window.location.hostname
     : 'localhost';
-  try { ws = new WebSocket(`ws://${wsHost}:8765`); }
-  catch (e) { mavLog('WS init failed: ' + e.message, 'err'); enterSimMode(); return; }
 
+  // Load server config for dynamic port discovery
+  fetch('server_config.json')
+    .then(res => res.json())
+    .then(config => {
+      const configHost = config.ws_host || wsHost;
+      const configPort = config.ws_port || 8765;
+      const wsUrl = `ws://${configHost}:${configPort}`;
+
+      updateConnectionDisplay(configHost, configPort);
+
+      try {
+        ws = new WebSocket(wsUrl);
+        mavLog(`Connecting to ${wsUrl}...`, 'info');
+      }
+      catch (e) {
+        mavLog('WS init failed: ' + e.message, 'err');
+        enterSimMode();
+        return;
+      }
+      setupWsHandlers();
+    })
+    .catch(err => {
+      // Fallback to default port if config not found
+      mavLog('Config not found, using default port 8765', 'warn');
+      updateConnectionDisplay(wsHost, 8765);
+      try {
+        ws = new WebSocket(`ws://${wsHost}:8765`);
+      }
+      catch (e) {
+        mavLog('WS init failed: ' + e.message, 'err');
+        enterSimMode();
+        return;
+      }
+      setupWsHandlers();
+    });
+}
+
+function setupWsHandlers() {
   ws.onopen = () => {
     wsConnected = true;
     simMode = false;
@@ -168,9 +232,20 @@ function connectBackend() {
   };
 
   ws.onmessage = (evt) => {
-    if (!droneConnected) return;
     let d;
     try { d = JSON.parse(evt.data); } catch (e) { return; }
+
+    if (d.type === 'PARAMETERS') {
+      updateParameterList(d.parameters || [], d);
+      return;
+    }
+
+    if (d.type === 'PARAM_STATUS' || d.type === 'PARAM_ACK' || d.type === 'PARAM_ERROR') {
+      handleParameterMessage(d);
+      return;
+    }
+
+    if (!droneConnected) return;
 
     // Attitude
     if (typeof d.raw_roll === 'number') roll = d.raw_roll;
@@ -195,6 +270,11 @@ function connectBackend() {
     if (typeof d.satellites === 'number') sats = d.satellites;
     if (typeof d.hdop === 'number') hdop = d.hdop;
     if (typeof d.connection === 'string') setConnectionMeta(d.connection, d.baud, d.stream_hz);
+    if (typeof d.param_loaded === 'number') {
+      const countEl = document.getElementById('param-count');
+      if (countEl && !droneParameters.length) countEl.textContent = d.param_loaded;
+      if (d.param_count) setParameterStatus(`${d.param_loaded}/${d.param_count} parameters cached`, d.param_loaded ? 'live' : '');
+    }
 
     // Battery
     if (typeof d.batt_voltage === 'number') batt = d.batt_voltage;
@@ -257,14 +337,14 @@ function connectBackend() {
     if (!simMode) {
       setWsIndicator('BACKEND OFFLINE', '');
       setPill('pill-ws', 'BACKEND OFFLINE', '');
-      mavLog('Backend disconnected — retrying in 3s...', 'err');
+      mavLog('Backend disconnected - retrying in 3s...', 'err');
       wsReconnectTimer = setTimeout(connectBackend, 3000);
     }
   };
 
   ws.onerror = () => {
     if (!simMode) {
-      mavLog('Cannot reach server.py — switching to SIM mode.', 'err');
+      mavLog('Cannot reach server.py - switching to SIM mode.', 'err');
       enterSimMode();
     }
   };
@@ -280,6 +360,185 @@ function enterSimMode() {
   if (connBtn) connBtn.disabled = false;
   const b = document.getElementById('gps-sim-banner');
   if (b) b.style.display = 'flex';
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// PARAMETER SETUP
+// ══════════════════════════════════════════════════════════════
+
+function initParameterPanel() {
+  const search = document.getElementById('param-search');
+  const filter = document.getElementById('param-filter');
+  if (search) search.addEventListener('input', renderParameterTable);
+  if (filter) filter.addEventListener('change', renderParameterTable);
+  renderParameterTable();
+}
+
+function setParameterStatus(text, cls = '') {
+  const el = document.getElementById('param-status');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'param-status ' + cls;
+}
+
+function requestParameters(refresh = false) {
+  if (wsConnected) {
+    wsSend({ cmd: refresh ? 'REFRESH_PARAMETERS' : 'GET_PARAMETERS' });
+    setParameterStatus(refresh ? 'Requesting drone parameters...' : 'Loading cached parameters...', 'sim');
+    mavLog(refresh ? 'Requested full parameter refresh from drone.' : 'Requested cached parameter list.', 'info');
+    return;
+  }
+
+  droneParameters = SIM_PARAMETERS.map(p => ({ ...p }));
+  parameterSource = 'simulation';
+  parameterLastUpdate = new Date();
+  setParameterStatus('Simulation parameters loaded', 'sim');
+  renderParameterTable();
+  mavLog('[SIM] Parameter list loaded locally.', 'warn');
+}
+
+function updateParameterList(parameters, meta = {}) {
+  droneParameters = parameters
+    .filter(p => p && p.name)
+    .map(p => ({
+      name: String(p.name),
+      value: Number(p.value),
+      type: p.type ?? '--',
+      index: p.index ?? null,
+      count: p.count ?? null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  parameterSource = meta.source || (wsConnected ? 'drone' : 'simulation');
+  parameterLastUpdate = new Date();
+  const expected = meta.expected_count || (droneParameters[0] && droneParameters[0].count) || droneParameters.length;
+  const label = `${droneParameters.length}${expected ? '/' + expected : ''} parameters loaded`;
+  setParameterStatus(label, droneParameters.length ? 'live' : '');
+  renderParameterTable();
+}
+
+function handleParameterMessage(message) {
+  if (message.type === 'PARAM_ERROR') {
+    setParameterStatus(message.message || 'Parameter error', 'danger');
+    mavLog('Parameter error: ' + (message.message || 'unknown error'), 'err');
+    return;
+  }
+
+  if (message.type === 'PARAM_ACK') {
+    setParameterStatus(message.message || 'Parameter write sent', 'live');
+    mavLog(message.message || 'Parameter write sent.', 'ok');
+    return;
+  }
+
+  setParameterStatus(message.message || 'Parameter request sent', message.state === 'requested' ? 'sim' : 'live');
+  mavLog(message.message || 'Parameter status update.', message.state === 'error' ? 'err' : 'info');
+}
+
+function getParameterCategory(name) {
+  const n = String(name || '').toUpperCase();
+  if (n.startsWith('ARM') || n.startsWith('FS_') || n.includes('FENCE')) return 'safety';
+  if (n.startsWith('BATT') || n.includes('BATTERY')) return 'battery';
+  if (n.startsWith('GPS') || n.startsWith('EK') || n.startsWith('AHRS')) return 'gps';
+  if (n.startsWith('RC') || n.startsWith('RSSI')) return 'radio';
+  if (n.startsWith('MOT') || n.startsWith('SERVO')) return 'motor';
+  if (n.startsWith('ATC') || n.startsWith('INS') || n.startsWith('RATE')) return 'attitude';
+  return 'system';
+}
+
+function formatParamValue(value) {
+  if (!Number.isFinite(value)) return '--';
+  if (Math.abs(value) >= 1000 || Number.isInteger(value)) return String(value);
+  return Number(value.toFixed(6)).toString();
+}
+
+function renderParameterTable() {
+  const body = document.getElementById('param-table-body');
+  if (!body) return;
+
+  const search = (document.getElementById('param-search')?.value || '').trim().toUpperCase();
+  const filter = document.getElementById('param-filter')?.value || 'all';
+  const rows = droneParameters.filter(param => {
+    const matchesSearch = !search || param.name.toUpperCase().includes(search);
+    const matchesFilter = filter === 'all' || getParameterCategory(param.name) === filter;
+    return matchesSearch && matchesFilter;
+  });
+
+  const countEl = document.getElementById('param-count');
+  const visibleEl = document.getElementById('param-visible');
+  const updatedEl = document.getElementById('param-updated');
+  const sourceEl = document.getElementById('param-source');
+  if (countEl) countEl.textContent = droneParameters.length;
+  if (visibleEl) visibleEl.textContent = rows.length > PARAM_RENDER_LIMIT ? `${PARAM_RENDER_LIMIT}/${rows.length}` : rows.length;
+  if (updatedEl) updatedEl.textContent = parameterLastUpdate ? parameterLastUpdate.toLocaleTimeString() : '--';
+  if (sourceEl) sourceEl.textContent = parameterSource || '--';
+
+  if (!droneParameters.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty-row">No parameters loaded. Use Load Cached or Refresh From Drone.</td></tr>';
+    return;
+  }
+
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty-row">No parameters match the current search/filter.</td></tr>';
+    return;
+  }
+
+  body.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+  rows.slice(0, PARAM_RENDER_LIMIT).forEach((param, index) => {
+    const inputId = `param-input-${index}`;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(param.name)}</td>
+      <td>${formatParamValue(param.value)}</td>
+      <td><input id="${inputId}" type="number" step="any" value="${formatParamValue(param.value)}" aria-label="New value for ${escapeHtml(param.name)}"></td>
+      <td>${escapeHtml(String(param.type))}</td>
+      <td><button class="btn btn-secondary" type="button" onclick="setDroneParameter('${escapeJs(param.name)}', '${inputId}')">Write</button></td>
+    `;
+    fragment.appendChild(tr);
+  });
+  body.appendChild(fragment);
+
+  if (rows.length > PARAM_RENDER_LIMIT) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="5" class="empty-row">Showing first ${PARAM_RENDER_LIMIT} matches. Use search to narrow the list.</td>`;
+    body.appendChild(tr);
+  }
+}
+
+function setDroneParameter(name, inputId) {
+  const input = document.getElementById(inputId);
+  const value = Number(input?.value);
+  if (!name || !Number.isFinite(value)) {
+    setParameterStatus('Enter a valid numeric value', 'danger');
+    return;
+  }
+
+  if (wsConnected) {
+    wsSend({ cmd: 'SET_PARAMETER', name, value });
+    setParameterStatus(`Writing ${name}...`, 'sim');
+    return;
+  }
+
+  const param = droneParameters.find(p => p.name === name);
+  if (param) param.value = value;
+  parameterSource = 'simulation';
+  parameterLastUpdate = new Date();
+  setParameterStatus(`[SIM] ${name} updated`, 'sim');
+  renderParameterTable();
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeJs(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 
@@ -326,7 +585,7 @@ function setConnectionMeta(connection, baud, telemetryHz) {
   const vals = document.querySelectorAll('.conn-meta-val');
   if (vals[0] && connection) vals[0].textContent = connection;
   if (vals[1] && baud) vals[1].textContent = baud;
-  if (vals[2]) vals[2].textContent = `${window.location.hostname || 'localhost'}:8765`;
+  // Port will be updated dynamically by loadServerConfig()
   if (telemetryHz) {
     streamHz = telemetryHz;
     const hzText = `${streamHz} Hz`;
@@ -337,9 +596,16 @@ function setConnectionMeta(connection, baud, telemetryHz) {
   }
 }
 
+function updateConnectionDisplay(wsHost, wsPort) {
+  const connWsEl = document.getElementById('conn-ws');
+  if (connWsEl) {
+    connWsEl.textContent = `${wsHost || window.location.hostname || 'localhost'}:${wsPort}`;
+  }
+}
+
 function armDrone() {
   if (!droneConnected) return;
-  if (wsConnected) { wsSend('ARM'); mavLog('Sent: "ARM" → arducopter_arm()', 'ok'); }
+  if (wsConnected) { wsSend('ARM'); mavLog('Sent: "ARM" -> arducopter_arm()', 'ok'); }
   else mavLog('[SIM] ARM command.', 'ok');
   droneArmed = true;
   document.getElementById('arm-status').textContent = 'ARMED';
@@ -352,7 +618,7 @@ function armDrone() {
 
 function disarmDrone() {
   if (!droneConnected) return;
-  if (wsConnected) { wsSend('DISARM'); mavLog('Sent: "DISARM" → arducopter_disarm()', 'ok'); }
+  if (wsConnected) { wsSend('DISARM'); mavLog('Sent: "DISARM" -> arducopter_disarm()', 'ok'); }
   else mavLog('[SIM] DISARM command.', 'ok');
   droneArmed = false;
   document.getElementById('arm-status').textContent = 'DISARMED';
@@ -362,7 +628,7 @@ function disarmDrone() {
 
 function sendRTL() {
   if (!droneConnected) return;
-  if (wsConnected) { wsSend({ cmd: 'RTL' }); mavLog('Sent: RTL command → backend', 'ok'); }
+  if (wsConnected) { wsSend({ cmd: 'RTL' }); mavLog('Sent: RTL command -> backend', 'ok'); }
   else mavLog('[SIM] RTL command.', 'ok');
   syncFlightMode('RTL');
 }
@@ -371,7 +637,7 @@ function setMode(el) {
   const modeName = el.textContent.trim();
   if (wsConnected && droneConnected) {
     wsSend({ cmd: 'SET_MODE', mode: modeName });
-    mavLog('Sent: SET_MODE → ' + modeName + ' → backend', 'ok');
+    mavLog('Sent: SET_MODE -> ' + modeName + ' -> backend', 'ok');
   } else {
     mavLog((simMode ? '[SIM] ' : '') + 'Flight mode selected: ' + modeName, 'ok');
   }
@@ -397,20 +663,20 @@ function renderTelemetryUI() {
   const _set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
 
   // Telemetry table
-  _set('t-lat', lat != null ? lat.toFixed(7) + '°' : '--');
-  _set('t-lon', lon != null ? lon.toFixed(7) + '°' : '--');
+  _set('t-lat', lat != null ? lat.toFixed(7) + ' deg' : '--');
+  _set('t-lon', lon != null ? lon.toFixed(7) + ' deg' : '--');
   _set('t-alt', Number.isFinite(alt) ? alt.toFixed(1) + ' m' : '--');
   _set('t-ralt', Number.isFinite(ralt) ? ralt.toFixed(1) + ' m' : '--');
   _set('t-spd', Number.isFinite(spd) ? spd.toFixed(2) + ' m/s' : '--');
   _set('t-aspd', Number.isFinite(aspd) ? aspd.toFixed(2) + ' m/s' : '--');
-  _set('t-hdg', Math.round(((yaw % 360) + 360) % 360) + '°');
+  _set('t-hdg', Math.round(((yaw % 360) + 360) % 360) + ' deg');
   _set('t-vspd', typeof vspd_live === 'number' ? vspd_live.toFixed(2) + ' m/s' : '--');
   _set('t-batt', batt > 0 ? batt.toFixed(2) + ' V' : '--');
   _set('t-bpct', bpct >= 0 ? bpct + '%' : '--');
   _set('t-curr', Number.isFinite(battI) ? battI.toFixed(2) + ' A' : '--');
   _set('t-sats', sats || '--');
   _set('t-hdop', hdop < 99 ? hdop.toFixed(2) : '--');
-  _set('t-ekf', ekfOk ? '✓ OK' : '✗ FAIL');
+  _set('t-ekf', ekfOk ? 'OK' : 'FAIL');
   const ekfEl = document.getElementById('t-ekf');
   if (ekfEl) ekfEl.style.color = ekfOk ? 'var(--accent2)' : 'var(--danger)';
 
@@ -521,7 +787,7 @@ function initGpsMap() {
   });
   droneMarker = L.marker([TRIDENT_LAT, TRIDENT_LON], { icon: droneIcon }).addTo(leafletMap);
   droneMarker.bindPopup(
-    `<b style="color:#ff3355">🔴 DRONE — SIM</b><br>
+    `<b style="color:#ff3355">DRONE - SIM</b><br>
      Trident Academy of Technology<br>
      Bhubaneswar, Odisha<br>
      <span style="color:#888">Lat: ${TRIDENT_LAT.toFixed(6)} · Lon: ${TRIDENT_LON.toFixed(6)}</span>`
@@ -538,7 +804,7 @@ function initGpsMap() {
   });
   simLocationMarker = L.marker([TRIDENT_LAT, TRIDENT_LON], { icon: locIcon, zIndexOffset: -10 }).addTo(leafletMap);
   simLocationMarker.bindTooltip(
-    '📍 Trident Academy of Technology, BBSR',
+    'Trident Academy of Technology, BBSR',
     { permanent: true, direction: 'top', offset: [0, -18], className: 'trident-tooltip' }
   );
 
@@ -617,7 +883,7 @@ function updateGpsMap() {
   const fixLabel = simMode ? '3D FIX (SIM)' : (fixNames[Math.min(gpsFix || 0, 6)] || `${gpsFix}`);
   const satsLabel = simMode ? `${sats} (SIM)` : `${sats}`;
   droneMarker.setPopupContent(
-    `<b style="color:#ff3355">🔴 DRONE ${simMode ? '— SIMULATION' : ''}</b><br>
+    `<b style="color:#ff3355">DRONE ${simMode ? '- SIMULATION' : ''}</b><br>
      ${simMode ? 'Trident Academy of Technology, BBSR<br>' : ''}
      <span style="color:#888">Lat: ${lat.toFixed(6)}</span><br>
      <span style="color:#888">Lon: ${lon.toFixed(6)}</span><br>
@@ -661,7 +927,7 @@ function runSimTick() {
   if (Math.random() < 0.04) ax += (Math.random() - 0.5) * 4;
   if (Math.random() < 0.04) gx += (Math.random() - 0.5) * 1.5;
 
-  // GPS sim — anchored to Trident Academy
+  // GPS sim - anchored to Trident Academy
   const SIM_LAT = 20.3403, SIM_LON = 85.8083;
   if (lat == null) { lat = SIM_LAT; lon = SIM_LON; }
   const driftR = 0.00018;
@@ -900,7 +1166,7 @@ function drawAttitude(rollDeg, pitchDeg, yawDeg) {
   // Heading text
   const hdg = Math.round(((yawDeg % 360) + 360) % 360);
   ctx.font = 'bold 11px Orbitron'; ctx.fillStyle = '#00d4ff'; ctx.textAlign = 'center';
-  ctx.fillText('HDG ' + hdg + '°', cx, cy + r - 6);
+  ctx.fillText('HDG ' + hdg + ' deg', cx, cy + r - 6);
 }
 
 
@@ -949,12 +1215,12 @@ function drawCompass(yawDeg) {
 
   // Heading label
   ctx.font = 'bold 13px Orbitron'; ctx.fillStyle = '#00ff88'; ctx.textAlign = 'center';
-  ctx.fillText(Math.round(hdg) + '°', W / 2, H - 20);
+  ctx.fillText(Math.round(hdg) + ' deg', W / 2, H - 20);
 }
 
 
 // ══════════════════════════════════════════════════════════════
-// RENDER LOOP (requestAnimationFrame — 60fps smooth)
+// RENDER LOOP (requestAnimationFrame - 60fps smooth)
 // ══════════════════════════════════════════════════════════════
 
 let rafRunning = false;
@@ -1009,15 +1275,15 @@ function startRenderLoop() {
 
     // Numeric labels
     const fmt = (v, dp) => isNaN(v) ? '--' : v.toFixed(dp);
-    document.getElementById('p-roll').textContent = fmt(d_roll, 1) + '°';
-    document.getElementById('p-pitch').textContent = fmt(d_pitch, 1) + '°';
-    document.getElementById('p-yaw').textContent = Math.round(((d_yaw % 360) + 360) % 360) + '°';
+    document.getElementById('p-roll').textContent = fmt(d_roll, 1) + ' deg';
+    document.getElementById('p-pitch').textContent = fmt(d_pitch, 1) + ' deg';
+    document.getElementById('p-yaw').textContent = Math.round(((d_yaw % 360) + 360) % 360) + ' deg';
     document.getElementById('gx-val').textContent = fmt(s_gx, 3) + ' rad/s';
     document.getElementById('gy-val').textContent = fmt(s_gy, 3) + ' rad/s';
     document.getElementById('gz-val').textContent = fmt(s_gz, 3) + ' rad/s';
-    document.getElementById('ax-val').textContent = fmt(s_ax, 3) + ' m/s²';
-    document.getElementById('ay-val').textContent = fmt(s_ay, 3) + ' m/s²';
-    document.getElementById('az-val').textContent = fmt(s_az, 3) + ' m/s²';
+    document.getElementById('ax-val').textContent = fmt(s_ax, 3) + ' m/s2';
+    document.getElementById('ay-val').textContent = fmt(s_ay, 3) + ' m/s2';
+    document.getElementById('az-val').textContent = fmt(s_az, 3) + ' m/s2';
 
     const sEl = document.getElementById('spd-box');
     const vEl = document.getElementById('vspd-box');

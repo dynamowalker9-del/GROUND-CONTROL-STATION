@@ -14,32 +14,58 @@ import websockets
 from pymavlink import mavutil
 
 
-def discover_drone_connection() -> str:
-    """Auto-detect a Linux serial device for the drone connection."""
+def discover_drone_connection() -> list:
+    """Auto-detect a list of serial devices for the drone connection (Windows & Linux), ordered by preference."""
+    if sys.platform.startswith('win'):
+        # Try these ports in order (based on typical ArduPilot setups)
+        possible_ports = ["COM21", "COM22", "COM20", "COM12", "COM13", "COM5", "COM7", "COM6", "COM9", "COM27","COM8"]
+
+        print("[auto-detect] Checking for ArduPilot on common COM ports...")
+        print("[auto-detect] Tip: Set DRONE_CONNECTION env var to force a specific port")
+
+        # Add any higher COM ports we should try
+        possible_ports.extend([f"COM{i}" for i in range(1, 30) if f"COM{i}" not in possible_ports])
+
+        print(f"[auto-detect] Will try these ports in order: {possible_ports}")
+        return possible_ports
+
+    # Linux: Check for /dev/serial/by-id
     serial_by_id = Path("/dev/serial/by-id")
+    ports = []
     if serial_by_id.exists():
         for entry in sorted(serial_by_id.iterdir()):
             if entry.is_symlink() or entry.is_char_device():
-                return str(entry)
+                ports.append(str(entry))
+        if ports:
+            print(f"[auto-detect] Found ports by-id: {ports}")
+            return ports
 
     for pattern in ("/dev/ttyACM*", "/dev/ttyUSB*", "/dev/ttyAMA*", "/dev/ttyS*"):
         matches = sorted(glob.glob(pattern))
         if matches:
-            return matches[0]
+            print(f"[auto-detect] Found ports by pattern {pattern}: {matches}")
+            return matches
 
-    return "/dev/ttyUSB0"
+    print(f"[auto-detect] No ports found, defaulting to [/dev/ttyUSB0]")
+    return ["/dev/ttyUSB0"]
 
 
 DRONE_CONNECTION = os.getenv("DRONE_CONNECTION") or discover_drone_connection()
-DRONE_BAUD = int(os.getenv("DRONE_BAUD", "57600"))
+print(f"[DEBUG] DRONE_CONNECTION set to: {DRONE_CONNECTION}")
+DRONE_BAUD = int(os.getenv("DRONE_BAUD", "115200"))
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
-WS_PORT = int(os.getenv("WS_PORT", "8765"))
+# Use port 0 for auto-assignment, or read from environment
+WS_PORT = int(os.getenv("WS_PORT", "0"))  # 0 = auto-assign available port
 STREAM_HZ = int(os.getenv("STREAM_HZ", "20"))
 RC_STREAM_HZ = int(os.getenv("RC_STREAM_HZ", "50"))
-COMMAND_WS_HOST = os.getenv("COMMAND_WS_HOST", "127.0.0.1")
-COMMAND_WS_PORT = int(os.getenv("COMMAND_WS_PORT", "8766"))
+COMMAND_WS_HOST = os.getenv("COMMAND_WS_HOST", "0.0.0.0")
+COMMAND_WS_PORT = int(os.getenv("COMMAND_WS_PORT", "0"))  # 0 = auto-assign available port
 COMMAND_TIMEOUT = int(os.getenv("COMMAND_TIMEOUT", "300"))
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+# Store actual ports after server starts
+ACTUAL_WS_PORT = None
+ACTUAL_COMMAND_WS_PORT = None
 
 COMMAND_MAP = {
     "1": "scripts/scripts1.py",
@@ -59,21 +85,44 @@ MODE_NAME_TO_ID = {v: k for k, v in COPTER_MODES.items()}
 
 # Initialize MAVLink connection with error handling
 master = None
-try:
-    print(f"Connecting to {DRONE_CONNECTION} @ {DRONE_BAUD} baud ...")
-    master = mavutil.mavlink_connection(
-        DRONE_CONNECTION, baud=DRONE_BAUD,
-        autoreconnect=True,
-        source_system=255,
-        source_component=0,
-    )
-    master.wait_heartbeat(timeout=30)
-    print(f"Heartbeat received — SysID={master.target_system}  CompID={master.target_component}")
-except Exception as e:
-    print(f"[ERROR] Failed to connect to drone at {DRONE_CONNECTION}: {e}")
-    print("[INFO] Server will still start and accept WebSocket connections.")
-    print("[INFO] Telemetry will not be available until drone connects.")
-    master = None
+if isinstance(DRONE_CONNECTION, list):
+    # Try each port in the list until one works
+    for port in DRONE_CONNECTION:
+        try:
+            print(f"Trying to connect to {port} @ {DRONE_BAUD} baud ...")
+            master = mavutil.mavlink_connection(
+                port, baud=DRONE_BAUD,
+                autoreconnect=True,
+                source_system=255,
+                source_component=0,
+            )
+            master.wait_heartbeat(timeout=10)
+            print(f"Heartbeat received on {port} - SysID={master.target_system}  CompID={master.target_component}")
+            break  # Success, exit loop
+        except Exception as e:
+            print(f"[INFO] Failed to connect to {port}: {e}")
+            master = None
+            continue  # Try next port
+else:
+    # Single port (backward compatibility)
+    try:
+        print(f"Connecting to {DRONE_CONNECTION} @ {DRONE_BAUD} baud ...")
+        master = mavutil.mavlink_connection(
+            DRONE_CONNECTION, baud=DRONE_BAUD,
+            autoreconnect=True,
+            source_system=255,
+            source_component=0,
+        )
+        master.wait_heartbeat(timeout=30)
+        print(f"Heartbeat received - SysID={master.target_system}  CompID={master.target_component}")
+    except Exception as e:
+        print(f"[ERROR] Failed to connect to drone at {DRONE_CONNECTION}: {e}")
+        print("[INFO] Server will still start and accept WebSocket connections.")
+        print("[INFO] Telemetry will not be available until drone connects.")
+        master = None
+
+if master is None:
+    print("[WARNING] No MAVLink connection established. Running in telemetry-only mode.")
 
 
 def request_streams():
@@ -124,7 +173,7 @@ telem = {
     "raw_gx":    0.0,  "raw_gy":    0.0,  "raw_gz":  0.0,
     # Accelerometer
     "raw_ax":    0.0,  "raw_ay":    0.0,  "raw_az":  9.8,
-    # GPS position — None until a valid fix arrives
+    # GPS position - None until a valid fix arrives
     "lat":       None, "lon":       None,
     "alt_msl":   0.0,  "alt_rel":   0.0,
     "gps_fix":   0,    "satellites": 0,   "hdop": 99.0,
@@ -133,7 +182,7 @@ telem = {
     "heading_deg": 0.0, "vspeed":     0.0,
     # Battery
     "batt_voltage": 0.0, "batt_current": 0.0, "batt_pct": -1,
-    # RC Channels (raw transmitter PWM) — None until the first real packet
+    # RC Channels (raw transmitter PWM) - None until the first real packet
     "rc1": None, "rc2": None, "rc3": None, "rc4": None,
     "rc5": None, "rc6": None, "rc7": None, "rc8": None,
     "rc_rssi": 0,
@@ -141,6 +190,8 @@ telem = {
     "rc_count_updates": 0, "rc_last_update_ms": 0,
     # Status
     "flight_mode": "UNKNOWN", "armed": False, "ekf_ok": False,
+    # Parameter setup status
+    "param_loaded": 0, "param_count": 0, "param_last_update_ms": 0,
     # Timestamp
     "ts": 0,
     "connection": DRONE_CONNECTION,
@@ -149,6 +200,12 @@ telem = {
     "rc_stream_hz": RC_STREAM_HZ,
 }
 lock = threading.Lock()
+
+parameter_store = {}
+parameter_lock = threading.Lock()
+parameter_generation = 0
+parameter_expected_count = 0
+parameter_last_update_ms = 0
 
 
 def valid_coord(latitude, longitude):
@@ -162,8 +219,87 @@ def valid_coord(latitude, longitude):
     )
 
 
+def normalize_param_id(param_id):
+    """Convert MAVLink PARAM_VALUE param_id into a clean Python string."""
+    if isinstance(param_id, bytes):
+        raw = param_id.decode("ascii", errors="ignore")
+    else:
+        raw = str(param_id)
+    return raw.split("\x00", 1)[0].strip()
+
+
+def request_parameters():
+    """Request the full parameter list from the flight controller."""
+    global parameter_generation, parameter_expected_count, parameter_last_update_ms
+    if master is None:
+        return False, "drone not connected"
+    parameter_last_update_ms = int(time.time() * 1000)
+    with parameter_lock:
+        parameter_store.clear()
+        parameter_expected_count = 0
+        parameter_generation += 1
+    with lock:
+        telem["param_loaded"] = 0
+        telem["param_count"] = 0
+        telem["param_last_update_ms"] = parameter_last_update_ms
+    master.mav.param_request_list_send(master.target_system, master.target_component)
+    return True, "parameter refresh requested"
+
+
+def snapshot_parameters():
+    with parameter_lock:
+        parameters = [
+            {
+                "name": name,
+                "value": item["value"],
+                "type": item["type"],
+                "index": item["index"],
+                "count": item["count"],
+            }
+            for name, item in sorted(parameter_store.items())
+        ]
+        return {
+            "type": "PARAMETERS",
+            "source": "drone",
+            "parameters": parameters,
+            "loaded_count": len(parameters),
+            "expected_count": parameter_expected_count,
+            "last_update_ms": parameter_last_update_ms,
+            "generation": parameter_generation,
+        }
+
+
+def set_parameter(name, value):
+    """Write one MAVLink parameter. ArduPilot acknowledges later with PARAM_VALUE."""
+    if master is None:
+        return False, "drone not connected"
+
+    param_name = normalize_param_id(name).upper()
+    if not param_name:
+        return False, "missing parameter name"
+    if len(param_name) > 16:
+        return False, "parameter name is longer than MAVLink's 16 byte limit"
+
+    with parameter_lock:
+        known_param = parameter_store.get(param_name)
+        param_type = known_param["type"] if known_param else mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+
+    master.mav.param_set_send(
+        master.target_system,
+        master.target_component,
+        param_name.encode("ascii", errors="ignore"),
+        float(value),
+        int(param_type),
+    )
+    return True, f"parameter write sent: {param_name}={value}"
+
+
+async def send_parameter_list(ws):
+    await ws.send(json.dumps(snapshot_parameters()))
+
 
 def reader():
+    global parameter_generation, parameter_expected_count, parameter_last_update_ms
     last_stream_req = time.time()
 
     while True:
@@ -203,7 +339,7 @@ def reader():
                 telem["raw_pitch"] = round(p, 4)
                 # Normalise yaw to 0-360
                 telem["raw_yaw"]   = round(y % 360 if y >= 0 else y % 360 + 360, 4)
-                # Real gyro rates (rad/s) — use these for the gyro graphs
+                # Real gyro rates (rad/s) - use these for the gyro graphs
                 telem["raw_gx"] = round(msg.rollspeed,  5)
                 telem["raw_gy"] = round(msg.pitchspeed, 5)
                 telem["raw_gz"] = round(msg.yawspeed,   5)
@@ -284,6 +420,23 @@ def reader():
                     if valid_v:
                         telem["batt_voltage"] = round(sum(valid_v) / 1000.0, 3)
 
+            elif mtype == "PARAM_VALUE":
+                param_name = normalize_param_id(msg.param_id).upper()
+                if param_name:
+                    parameter_expected_count = int(getattr(msg, "param_count", 0) or 0)
+                    parameter_last_update_ms = int(time.time() * 1000)
+                    with parameter_lock:
+                        parameter_store[param_name] = {
+                            "value": round(float(msg.param_value), 6),
+                            "type": int(getattr(msg, "param_type", 0) or 0),
+                            "index": int(getattr(msg, "param_index", -1) or -1),
+                            "count": parameter_expected_count,
+                        }
+                        parameter_generation += 1
+                    telem["param_loaded"] = len(parameter_store)
+                    telem["param_count"] = parameter_expected_count
+                    telem["param_last_update_ms"] = parameter_last_update_ms
+
 
             elif mtype == "HEARTBEAT":
                 if (msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID and
@@ -350,7 +503,7 @@ threading.Thread(target=reader, daemon=True, name="mav-reader").start()
 
 
 
-async def handle_command(raw: str):
+async def handle_command(ws, raw: str):
 
     try:
         cmd = json.loads(raw)
@@ -393,7 +546,7 @@ async def handle_command(raw: str):
             mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
             mode_id,
         )
-        print(f"[cmd] SET_MODE → {mode_name} (id={mode_id})")
+        print(f"[cmd] SET_MODE -> {mode_name} (id={mode_id})")
 
     elif action == "RTL":
         if master is None:
@@ -425,6 +578,36 @@ async def handle_command(raw: str):
         request_streams()
         print("[cmd] RESTREAM")
 
+    elif action == "GET_PARAMETERS":
+        await send_parameter_list(ws)
+
+    elif action == "REFRESH_PARAMETERS":
+        ok, message = request_parameters()
+        await ws.send(command_json(
+            "PARAM_STATUS" if ok else "PARAM_ERROR",
+            state="requested" if ok else "error",
+            message=message,
+        ))
+        await send_parameter_list(ws)
+
+    elif action in ("SET_PARAMETER", "SET_PARAM"):
+        name = cmd.get("name", "")
+        try:
+            value = float(cmd.get("value"))
+        except (TypeError, ValueError):
+            await ws.send(command_json("PARAM_ERROR", message="invalid numeric parameter value"))
+            return
+
+        ok, message = set_parameter(name, value)
+        await ws.send(command_json(
+            "PARAM_ACK" if ok else "PARAM_ERROR",
+            name=normalize_param_id(name).upper(),
+            value=value,
+            message=message,
+        ))
+        if ok:
+            print(f"[cmd] {message}")
+
 
 def _arm(arm: bool):
     """Send arm/disarm via MAV_CMD_COMPONENT_ARM_DISARM (works on all pymavlink versions)."""
@@ -446,16 +629,23 @@ def _arm(arm: bool):
 async def _send_loop(ws):
     """Push telemetry snapshots to the browser at the configured stream rate."""
     send_interval = 1.0 / max(1, STREAM_HZ, RC_STREAM_HZ)
+    last_parameter_generation = -1
+    last_parameter_push = 0.0
     while True:
         await asyncio.sleep(send_interval)
         with lock:
             payload = dict(telem)
         try:
             await ws.send(json.dumps(payload))
+            now = time.time()
+            if parameter_generation != last_parameter_generation and now - last_parameter_push >= 1.0:
+                await send_parameter_list(ws)
+                last_parameter_generation = parameter_generation
+                last_parameter_push = now
         except websockets.exceptions.ConnectionClosed:
             break
         except Exception as e:
-            # Transient errors — keep trying instead of silently dying
+            # Transient errors - keep trying instead of silently dying
             print(f"[send] warning: {e}")
             await asyncio.sleep(0.1)
 
@@ -590,7 +780,7 @@ async def ws_handler(ws):
     sender = asyncio.create_task(_send_loop(ws))
     try:
         async for message in ws:
-            await handle_command(message)
+            await handle_command(ws, message)
     except websockets.exceptions.ConnectionClosed:
         pass
     except Exception as e:
@@ -604,10 +794,32 @@ async def main():
 
     asyncio.create_task(_gcs_heartbeat())
 
+    # Start WebSocket servers and capture actual ports
+    global ACTUAL_WS_PORT, ACTUAL_COMMAND_WS_PORT
+
+    ws_server = await websockets.serve(ws_handler, WS_HOST, WS_PORT)
+    cmd_server = await websockets.serve(terminal_ws_handler, COMMAND_WS_HOST, COMMAND_WS_PORT)
+
+    # Extract actual port numbers (in case port 0 was used for auto-assignment)
+    ACTUAL_WS_PORT = ws_server.sockets[0].getsockname()[1]
+    ACTUAL_COMMAND_WS_PORT = cmd_server.sockets[0].getsockname()[1]
+
+    # Write config file for client auto-discovery
+    config = {
+        "ws_host": WS_HOST if WS_HOST != "0.0.0.0" else "localhost",
+        "ws_port": ACTUAL_WS_PORT,
+        "command_ws_host": COMMAND_WS_HOST if COMMAND_WS_HOST != "0.0.0.0" else "localhost",
+        "command_ws_port": ACTUAL_COMMAND_WS_PORT,
+    }
+    config_path = PROJECT_ROOT / "server_config.json"
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    print(f"[config] Saved to {config_path}")
+
     print("=" * 50)
     print("  DroneGuard MAVLink Backend v4")
-    print(f"  Telemetry WS: ws://{WS_HOST}:{WS_PORT}")
-    print(f"  Command WS:   ws://{COMMAND_WS_HOST}:{COMMAND_WS_PORT}")
+    print(f"  Telemetry WS: ws://{WS_HOST}:{ACTUAL_WS_PORT}")
+    print(f"  Command WS:   ws://{COMMAND_WS_HOST}:{ACTUAL_COMMAND_WS_PORT}")
     print(f"  Drone:     {DRONE_CONNECTION} @ {DRONE_BAUD} baud")
     print(f"  Stream:    {STREAM_HZ} Hz")
     print(f"  RC stream: {RC_STREAM_HZ} Hz raw PWM")
@@ -616,10 +828,7 @@ async def main():
         print(f"    {command_id}: {script}")
     print("=" * 50)
 
-    async with (
-        websockets.serve(ws_handler, WS_HOST, WS_PORT),
-        websockets.serve(terminal_ws_handler, COMMAND_WS_HOST, COMMAND_WS_PORT),
-    ):
+    async with (ws_server, cmd_server):
         await asyncio.Future()   # run forever
 
 

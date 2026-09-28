@@ -1,5 +1,4 @@
 (function() {
-const COMMAND_WS_PORT = 8766;
 const MAX_TERMINAL_CHARS = 120000;
 const MAX_HISTORY = 30;
 
@@ -8,6 +7,7 @@ let connected = false;
 let running = false;
 let commandCatalog = {};
 let reconnectTimer = null;
+let commandWsPort = 8766;  // Default fallback
 
 const outputEl = document.getElementById('terminal-output');
 const inputEl = document.getElementById('command-input');
@@ -24,10 +24,22 @@ document.addEventListener('DOMContentLoaded', () => {
   updateClock();
   setInterval(updateClock, 1000);
   bindEvents();
-  connectCommandServer();
+  loadServerConfig().then(() => connectCommandServer());
   appendOutput('[SYS] DroneGuard Command Center ready.\n');
   appendOutput('[SYS] Start server.py, then enter a whitelisted command ID such as 1.\n\n');
 });
+
+function loadServerConfig() {
+  return fetch('server_config.json')
+    .then(res => res.json())
+    .then(config => {
+      commandWsPort = config.command_ws_port || 8766;
+      appendOutput(`[SYS] Loaded config - Command port: ${commandWsPort}\n`);
+    })
+    .catch(err => {
+      appendOutput(`[SYS] Config file not found, using default port ${commandWsPort}\n`);
+    });
+}
 
 function bindEvents() {
   runBtn.addEventListener('click', runCommand);
@@ -58,7 +70,7 @@ function connectCommandServer() {
   setConnected(false, 'CONNECTING');
 
   try {
-    ws = new WebSocket(`ws://${wsHost}:${COMMAND_WS_PORT}`);
+    ws = new WebSocket(`ws://${wsHost}:${commandWsPort}`);
   } catch (error) {
     appendOutput(`[ERR] WebSocket init failed: ${error.message}\n`);
     scheduleReconnect();
